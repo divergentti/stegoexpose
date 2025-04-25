@@ -179,4 +179,4 @@ Future output in JSON:
 
 ## 📜 License
 
-MIT License (or specify your own)
+MIT License
