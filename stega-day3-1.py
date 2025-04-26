@@ -143,13 +143,6 @@ class JavaRandom:
         if n <= 0:
             raise ValueError("Bound must be positive")
 
-        # Special handling for the first nextInt(1600) call
-        # Based on our debugging, we need to adjust by 64 for this specific case
-        if n == 1600 and self.seed == 25214903917:
-            # Perform the regular calculation
-            self.seed = (self.seed * 0x5DEECE66D + 0xB) & ((1 << 48) - 1)
-            return 496  # Return the expected value directly
-
         # Handle power of two case
         if (n & -n) == n:  # n is a power of two
             return (n * self.next(31)) >> 31
@@ -165,7 +158,7 @@ def test_javarandom():
     """Test the JavaRandom implementation to ensure it matches Java's Random."""
     rand = JavaRandom(0)
     print("Testing JavaRandom with seed 0:")
-    print(f"nextInt(1600): {rand.nextInt(1600)}")  # Should be 496
+    print(f"nextInt(1600): {rand.nextInt(1600)}")  # Should be 560
     print(f"nextInt(1200): {rand.nextInt(1200)}")  # Should be 748
     print(f"nextInt(3): {rand.nextInt(3)}")       # Should be 1
     print(f"nextInt(1600): {rand.nextInt(1600)}")  # Should be 1247
