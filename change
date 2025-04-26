@@ -1,0 +1,44 @@
+"""
+Sinun tulee muokata Python-funktiotasi get_openstego_seed vastaamaan StringUtil.passwordHash-metodin toimintaa. Tässä on esimerkki, miten voisit tehdä sen Pythonissa hashlib-kirjastoa käyttäen:
+
+"""  
+
+
+import hashlib
+from typing import Optional
+
+def get_openstego_seed(password: Optional[str]) -> int:
+    """
+    Generate the seed exactly as OpenStego's StringUtil.passwordHash does.
+    Uses MD5, converts to hex, takes first 15 chars, parses as long (base 16).
+    """
+    DEFAULT_HASH = 98234782
+
+    if password is None or password == "":
+        return DEFAULT_HASH
+
+    try:
+        # Calculate MD5 hash of the UTF-8 encoded password
+        md5_hash = hashlib.md5(password.encode('utf-8')).digest()
+
+        # Convert byte hash to hex string
+        # hex() adds "0x", remove it. zfill ensures leading zeros if needed,
+        # though MD5 hash is always 16 bytes -> 32 hex chars.
+        hex_string = md5_hash.hex() # hashlib's hex() is convenient
+
+        # Take only the first 15 characters
+        trimmed_hex = hex_string[:15]
+
+        # Parse the 15-char hex string as an integer (base 16)
+        seed = int(trimmed_hex, 16)
+        return seed
+
+    except Exception as e:
+        print(f"Error calculating password hash: {e}")
+        # Fallback or re-raise, depending on desired behavior
+        return DEFAULT_HASH # Or raise an error
+
+# --- Esimerkkikäyttö ---
+# Muista testata myös tyhjällä salasanalla:
+# print(f"Seed for '': {get_openstego_seed('')}") # Pitäisi tulostaa 98234782
+# print(f"Seed for 'test': {get_openstego_seed('test')}")
