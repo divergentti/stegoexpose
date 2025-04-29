@@ -62,7 +62,7 @@ public class JavaRandom {
     public static void main(String[] args) {
         JavaRandom rand = new JavaRandom(0, true);
         System.out.println("Testing JavaRandom with seed 0:");
-        System.out.println("nextInt(1600): " + rand.nextInt(1600) + " Should be 496");
+        System.out.println("nextInt(1600): " + rand.nextInt(1600) + " Should be 560");
         System.out.println("nextInt(1200): " + rand.nextInt(1200) + " Should be 748");
         System.out.println("nextInt(3): " + rand.nextInt(3) + " Should be 1");
         System.out.println("nextInt(1600): " + rand.nextInt(1600) + " Should be 1247");

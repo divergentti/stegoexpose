@@ -1,8 +1,8 @@
 import os
 from PIL import Image
 
-source_dir = '/home/jari/PycharmProjects/koodaus/stegaexpose/ml/clean.jpg'
-target_dir = '/home/jari/PycharmProjects/koodaus/stegaexpose/ml/clean'
+source_dir = 'stegaexpose/ml/clean.jpg'
+target_dir = 'stegaexpose/ml/clean'
 
 os.makedirs(target_dir, exist_ok=True)
 

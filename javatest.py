@@ -54,7 +54,7 @@ class JavaRandom:
 if __name__ == "__main__":
     rand = JavaRandom(0, debug=True)
     print("Testing JavaRandom with seed 0:")
-    print(f"nextInt(1600): {rand.next_int(1600)} Should be 496")
+    print(f"nextInt(1600): {rand.next_int(1600)} Should be 560")
     print(f"nextInt(1200): {rand.next_int(1200)} Should be 748")
     print(f"nextInt(3): {rand.next_int(3)} Should be 1")
     print(f"nextInt(1600): {rand.next_int(1600)} Should be 1247")
