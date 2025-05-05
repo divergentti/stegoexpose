@@ -537,9 +537,12 @@ class Training:
         self.calibrator.fit(probs, labels)
         print("Probability calibrator trained")
 
-    def train(self, original_dir: str, original_jpg_dir: str, stego_dirs: dict, epochs: int = 100, batch_size: int = 32):
-        train_dataset = StegoDataset(original_dir, original_jpg_dir, stego_dirs, self.transform, split='train', train_ratio=0.7)
-        val_dataset = StegoDataset(original_dir, original_jpg_dir, stego_dirs, self.transform, split='val', train_ratio=0.7)
+    def train(self, original_dir: str, original_jpg_dir: str, stego_dirs: dict, epochs: int = 100,
+              batch_size: int = 32):
+        train_dataset = StegoDataset(original_dir, original_jpg_dir, stego_dirs, self.transform, split='train',
+                                     train_ratio=0.7)
+        val_dataset = StegoDataset(original_dir, original_jpg_dir, stego_dirs, self.transform, split='val',
+                                   train_ratio=0.7)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
@@ -548,8 +551,6 @@ class Training:
                 lr = self.warmup_lr + (self.base_lr - self.warmup_lr) * epoch / self.warmup_epochs
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = lr
-            else:
-                self.scheduler.step()
 
             self.model.train()
             train_loss = 0.0
@@ -635,6 +636,10 @@ class Training:
             for tool in tool_correct:
                 acc = tool_correct[tool] / tool_total[tool] if tool_total[tool] > 0 else 0
                 print(f"{tool}: {acc:.4f} ({tool_correct[tool]}/{tool_total[tool]})")
+
+            # Pass validation loss to scheduler
+            if epoch >= self.warmup_epochs:
+                self.scheduler.step(val_loss)
 
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
