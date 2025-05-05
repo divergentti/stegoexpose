@@ -714,7 +714,8 @@ def calibrate_model(model, val_loader):
 
     # Train logistic regression for calibration
     lr = LogisticRegression(C=1.0)
-    calibrated_model = CalibratedClassifierCV(lr, method='sigmoid', cv='prefit')
+    # Remove cv='prefit' to allow proper fitting
+    calibrated_model = CalibratedClassifierCV(lr, method='sigmoid')  # Corrected line
     calibrated_model.fit(features, labels)
 
     return calibrated_model
