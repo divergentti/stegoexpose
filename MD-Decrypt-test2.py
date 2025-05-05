@@ -16,7 +16,7 @@ import torchvision
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 import warnings
-import os
+import pickle
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -49,14 +49,6 @@ def build_clean_phash_map(clean_dir, clean_jpg_dir):
                 if ph is not None:
                     phash_map[ph] = full_path
     return phash_map
-
-
-def compute_histogram_features(img_tensor):
-    img_np = img_tensor.cpu().numpy().transpose(1, 2, 0)  # [C, H, W] -> [H, W, C]
-    diff = np.diff(img_np, axis=0)  # Vertical pixel differences
-    hist, _ = np.histogram(diff.ravel(), bins=256, range=(-255, 255))
-    hist = hist / (hist.sum() + 1e-6)  # Normalize
-    return torch.tensor(hist, dtype=torch.float32).view(1, 256, 1, 1)
 
 
 class JavaRandom:
@@ -210,7 +202,7 @@ class OutGuessIdentifier:
         coeffs = []
         for i in range(0, h, 8):
             for j in range(0, w, 8):
-                block = img[i:i + 8, j:j + 8]
+                block = img[i:i+8, j:j+8]
                 coeff = dct(dct(block.T, norm='ortho').T, norm='ortho')
                 coeffs.append(coeff.flatten())
         if not coeffs:
@@ -223,7 +215,7 @@ class OutGuessIdentifier:
         if not self.image_path.lower().endswith('.jpg'):
             return None
         coeffs = self.extract_dct_coefficients()
-        if coeffs is None:
+        if coeffs is None or len(coeffs) == 0:
             print(f"No valid DCT coefficients for {self.image_path}")
             return None
         lsb = (coeffs % 2).astype(int)
@@ -231,8 +223,7 @@ class OutGuessIdentifier:
         counts = np.bincount(lsb, minlength=2)[:2]
         expected = np.array([len(lsb) / 2] * 2)
         if counts.shape != expected.shape:
-            print(
-                f"Shape mismatch in chisquare: counts={counts.shape}, expected={expected.shape}, lsb={np.unique(lsb)}")
+            print(f"Shape mismatch in chisquare: counts={counts.shape}, expected={expected.shape}, lsb={np.unique(lsb)}")
             return None
         try:
             chi2, p = chisquare(counts, expected)
@@ -266,29 +257,29 @@ class SRMFilter(nn.Module):
     def __init__(self):
         super(SRMFilter, self).__init__()
         srm_kernels = torch.tensor([
-            [[[-1, 2, -2, 2, -1],
-              [2, -6, 8, -6, 2],
-              [-2, 8, -12, 8, -2],
-              [2, -6, 8, -6, 2],
-              [-1, 2, -2, 2, -1]]],  # KV kernel
-            [[[0, 0, 0, 0, 0],
-              [0, -1, 2, -1, 0],
-              [0, 2, -4, 2, 0],
-              [0, -1, 2, -1, 0],
-              [0, 0, 0, 0, 0]]],  # Linear kernel
-            [[[0, 0, 1, 0, 0],
-              [0, 2, -8, 2, 0],
-              [1, -8, 20, -8, 1],
-              [0, 2, -8, 2, 0],
-              [0, 0, 1, 0, 0]]],  # Square kernel
+            [[[-1,  2, -2,  2, -1],
+              [ 2, -6,  8, -6,  2],
+              [-2,  8, -12, 8, -2],
+              [ 2, -6,  8, -6,  2],
+              [-1,  2, -2,  2, -1]]],  # KV kernel
+            [[[ 0,  0,  0,  0,  0],
+              [ 0, -1,  2, -1,  0],
+              [ 0,  2, -4,  2,  0],
+              [ 0, -1,  2, -1,  0],
+              [ 0,  0,  0,  0,  0]]],  # Linear kernel
+            [[[ 0,  0,  1,  0,  0],
+              [ 0,  2, -8,  2,  0],
+              [ 1, -8, 20, -8,  1],
+              [ 0,  2, -8,  2,  0],
+              [ 0,  0,  1,  0,  0]]],  # Square kernel
         ], dtype=torch.float32)
         srm_kernels = srm_kernels / srm_kernels.abs().sum(dim=(2, 3), keepdim=True)
         self.conv = nn.Conv2d(3, 9, kernel_size=5, padding=2, bias=False)
         weights = torch.zeros(9, 3, 5, 5)
         for i in range(3):
-            weights[i * 3, i] = srm_kernels[0]
-            weights[i * 3 + 1, i] = srm_kernels[1]
-            weights[i * 3 + 2, i] = srm_kernels[2]
+            weights[i*3, i] = srm_kernels[0]
+            weights[i*3+1, i] = srm_kernels[1]
+            weights[i*3+2, i] = srm_kernels[2]
         self.conv.weight = nn.Parameter(weights, requires_grad=False)
 
     def forward(self, x):
@@ -369,12 +360,11 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.8, gamma=2.0):
+    def __init__(self, alpha=0.5, gamma=1.5):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        # Significantly higher weight for clean class (label 0)
-        self.class_weights = torch.tensor([5.0, 1.0]).to(DEVICE)
+        self.class_weights = torch.tensor([1.5, 1.0]).to(DEVICE)  # Balanced weights
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
@@ -382,42 +372,19 @@ class FocalLoss(nn.Module):
         BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
         pt = torch.exp(-BCE_loss)
         F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
-        # Apply higher weight for clean class
         weights = self.class_weights[targets.long()]
         F_loss = F_loss * weights
         return F_loss.mean()
 
 
-# Mixup data augmentation helper functions
-def mixup_data(x, y, alpha=0.2):
-    '''Mixup data augmentation'''
-    if alpha > 0:
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-
-    batch_size = x.size()[0]
-    index = torch.randperm(batch_size).to(x.device)
-
-    mixed_x = lam * x + (1 - lam) * x[index, :]
-    y_a, y_b = y, y[index]
-    return mixed_x, y_a, y_b, lam
-
-
-def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    '''Mixup loss calculation'''
-    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
-
-
 class StegoDataset(Dataset):
-    def __init__(self, original_dir: str, original_jpg_dir: str, stego_dirs: dict, transform=None, split='train',
-                 train_ratio=0.7):
+    def __init__(self, original_dir: str, original_jpg_dir: str, stego_dirs: dict, transform=None, split='train', train_ratio=0.7):
         self.transform = transform
         self.original_dir = original_dir
         self.original_jpg_dir = original_jpg_dir
         self.stego_dirs = stego_dirs
 
-        # Collect clean images (use only ml/clean)
+        # Collect clean images
         self.original_files = []
         if os.path.exists(original_dir):
             files = sorted(
@@ -445,7 +412,7 @@ class StegoDataset(Dataset):
             self.stego_files[tool] = [os.path.join(stego_dir, f) for f in stego_files]
             print(f"{tool}: {len(stego_files)} stego images found")
 
-        # Build dataset: include clean images with at least one stego match
+        # Build dataset
         self.data = []
         clean_base_names = set()
         for orig_path in self.original_files:
@@ -494,23 +461,9 @@ class StegoDataset(Dataset):
         labels = [label for _, label, _ in self.data]
         indices = list(range(len(self.data)))
         train_indices, val_indices = train_test_split(
-            indices,
-            train_size=train_ratio,
-            stratify=labels,
-            random_state=42,
-            shuffle=True  # Ensure shuffling before split
+            indices, train_size=train_ratio, stratify=labels, random_state=42, shuffle=True
         )
         self.indices = train_indices if split == 'train' else val_indices
-
-        # Add oversampling for clean images in training set
-        if split == 'train':
-            clean_indices = [i for i in self.indices if self.data[i][2] == "clean"]
-            # Duplicate clean indices 3 times to balance the dataset
-            extra_clean_indices = clean_indices * 3
-            self.indices = self.indices + extra_clean_indices
-            print(
-                f"After oversampling: {len(self.indices)} samples ({len(extra_clean_indices)} additional clean samples)")
-
         print(f"Dataset: {len(self.data)} total, {len(self.indices)} {'train' if split == 'train' else 'val'}")
 
     def __len__(self):
@@ -519,7 +472,6 @@ class StegoDataset(Dataset):
     def __getitem__(self, idx):
         actual_idx = self.indices[idx]
         img_path, label, tool = self.data[actual_idx]
-
         try:
             image = Image.open(img_path).convert('RGB')
             if self.transform:
@@ -527,99 +479,126 @@ class StegoDataset(Dataset):
             return image, torch.tensor(label, dtype=torch.float32), tool
         except Exception as e:
             print(f"Error loading image {img_path}: {e}")
-            # Return a blank image as a fallback
+            blank = Image.new('RGB', (256, 256), color='black')
             if self.transform:
-                blank = torch.zeros(3, 256, 256)
-            else:
-                blank = Image.new('RGB', (256, 256), color='black')
-                if self.transform:
-                    blank = self.transform(blank)
+                blank = self.transform(blank)
             return blank, torch.tensor(0.0, dtype=torch.float32), "failed"
 
 
-def train_model(model, train_loader, val_loader, optimizer, criterion, num_epochs=10, mixup_alpha=0.2, save_path=None):
+def train_model(model, train_loader, val_loader, optimizer, criterion, num_epochs=100, save_path=None):
     best_val_loss = float('inf')
+    patience = 15
+    epochs_no_improve = 0
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
+    scaler = torch.amp.GradScaler('cuda') if DEVICE == 'cuda' else None
 
     for epoch in range(num_epochs):
-        # Training phase
+        # Learning rate warmup
+        if epoch < 5:
+            lr = 1e-6 + (5e-5 - 1e-6) * epoch / 5
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
+        train_preds, train_labels = [], []
 
         for batch_idx, (inputs, targets, _) in enumerate(train_loader):
             inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
-
-            # Apply mixup augmentation
-            inputs_mixed, targets_a, targets_b, lam = mixup_data(inputs, targets, mixup_alpha)
-
             optimizer.zero_grad()
-            outputs = model(inputs_mixed)
-
-            # Calculate loss with mixup
-            loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item()
-
-            # Calculate accuracy (using original inputs)
-            with torch.no_grad():
-                outputs_orig = model(inputs)
-                predicted = (torch.sigmoid(outputs_orig) > 0.5).float()
-                train_correct += (predicted == targets).sum().item()
-                train_total += targets.size(0)
-
-            if batch_idx % 10 == 0:
-                print(
-                    f'Epoch {epoch + 1}/{num_epochs} | Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.4f}')
-
-        train_loss = train_loss / len(train_loader)
-        train_acc = train_correct / train_total
-
-        # Validation phase
-        model.eval()
-        val_loss, val_correct, val_total = 0.0, 0, 0
-
-        with torch.no_grad():
-            for inputs, targets, _ in val_loader:
-                inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+            with torch.amp.autocast('cuda') if DEVICE == 'cuda' else torch.no_grad():
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                optimizer.step()
 
-                val_loss += loss.item()
-                predicted = (torch.sigmoid(outputs) > 0.5).float()
-                val_correct += (predicted == targets).sum().item()
-                val_total += targets.size(0)
+            train_loss += loss.item() * inputs.size(0)
+            probs = torch.sigmoid(outputs)
+            preds = (probs > 0.5).float()
+            train_correct += (preds == targets).sum().item()
+            train_total += targets.size(0)
+            train_preds.extend(preds.cpu().numpy())
+            train_labels.extend(targets.cpu().numpy())
 
-        val_loss = val_loss / len(val_loader)
-        val_acc = val_correct / val_total
+            if batch_idx == 0:
+                print(f"Epoch {epoch + 1}, Sample Probs: {probs[:4].cpu().detach().numpy()}")
+                print(f"Epoch {epoch + 1}, Sample Labels: {targets[:4].cpu().detach().numpy()}")
 
-        # Store history
+        train_loss = train_loss / train_total
+        train_acc = train_correct / train_total
         history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
         history['train_acc'].append(train_acc)
+        print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+        cm = confusion_matrix(train_labels, train_preds)
+        print(f"Train Confusion Matrix:\n{cm}")
+
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        val_preds, val_labels = [], []
+        tool_correct = {"clean": 0, "openstego": 0, "steghide": 0, "outguess": 0}
+        tool_total = {"clean": 0, "openstego": 0, "steghide": 0, "outguess": 0}
+
+        with torch.no_grad():
+            for inputs, targets, tools in val_loader:
+                inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+                with torch.amp.autocast('cuda') if DEVICE == 'cuda' else torch.no_grad():
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
+
+                val_loss += loss.item() * inputs.size(0)
+                probs = torch.sigmoid(outputs)
+                preds = (probs > 0.5).float()
+                val_correct += (preds == targets).sum().item()
+                val_total += targets.size(0)
+                val_preds.extend(preds.cpu().numpy())
+                val_labels.extend(targets.cpu().numpy())
+
+                for i, label in enumerate(targets):
+                    tool = tools[i]
+                    if tool == "failed":
+                        continue
+                    tool_total[tool] += 1
+                    if preds[i] == label:
+                        tool_correct[tool] += 1
+
+        val_loss = val_loss / val_total
+        val_acc = val_correct / val_total
+        history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
+        print(f"Epoch {epoch + 1}/{num_epochs} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
+        cm = confusion_matrix(val_labels, val_preds)
+        print(f"Val Confusion Matrix:\n{cm}")
+        print("Tool-specific Val Acc:")
+        for tool in tool_correct:
+            acc = tool_correct[tool] / tool_total[tool] if tool_total[tool] > 0 else 0
+            print(f"{tool}: {acc:.4f} ({tool_correct[tool]}/{tool_total[tool]})")
 
-        print(
-            f'Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}')
-
-        # Save best model
         if val_loss < best_val_loss and save_path:
             best_val_loss = val_loss
-            # Save model using safetensors
+            epochs_no_improve = 0
             state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
             save_file(state_dict, save_path)
             print(f"Saved best model to {save_path}")
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch + 1}")
+                break
 
     return history
 
 
 def evaluate_model(model, test_loader):
     model.eval()
-    all_preds = []
-    all_targets = []
-    all_scores = []
-    all_tools = []
+    all_preds, all_targets, all_scores, all_tools = [], [], [], []
 
     with torch.no_grad():
         for inputs, targets, tools in test_loader:
@@ -637,17 +616,15 @@ def evaluate_model(model, test_loader):
     all_targets = np.array(all_targets).flatten()
     all_scores = np.array(all_scores).flatten()
 
-    # Calculate metrics
     accuracy = (all_preds == all_targets).mean()
     cm = confusion_matrix(all_targets, all_preds)
-    tn, fp, fn, tp = cm.ravel()
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
 
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     f1 = 2 * precision * sensitivity / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
 
-    # Tool-specific metrics
     tool_metrics = {}
     for tool in set(all_tools):
         if tool == "failed":
@@ -658,26 +635,20 @@ def evaluate_model(model, test_loader):
 
         tool_preds = all_preds[tool_indices]
         tool_targets = all_targets[tool_indices]
+        tool_cm = confusion_matrix(tool_targets, tool_preds, labels=[0, 1]) if len(tool_preds) > 0 else np.zeros((2, 2))
+        tn, fp, fn, tp = tool_cm.ravel() if tool_cm.size == 4 else (0, 0, 0, 0)
 
-        if len(set(tool_targets)) < 2:  # Need both classes for confusion matrix
-            continue
-
-        tool_cm = confusion_matrix(tool_targets, tool_preds)
-
-        if tool_cm.size == 4:  # Ensure it's a 2x2 matrix
-            tn, fp, fn, tp = tool_cm.ravel()
-            tool_metrics[tool] = {
-                'accuracy': (tp + tn) / (tp + tn + fp + fn),
-                'sensitivity': tp / (tp + fn) if (tp + fn) > 0 else 0,
-                'specificity': tn / (tn + fp) if (tn + fp) > 0 else 0,
-                'precision': tp / (tp + fp) if (tp + fp) > 0 else 0,
-            }
-            tool_metrics[tool]['f1'] = 2 * tool_metrics[tool]['precision'] * tool_metrics[tool]['sensitivity'] / (
-                    tool_metrics[tool]['precision'] + tool_metrics[tool]['sensitivity']) if (
-                                                                                                    tool_metrics[tool][
-                                                                                                        'precision'] +
-                                                                                                    tool_metrics[tool][
-                                                                                                        'sensitivity']) > 0 else 0
+        tool_metrics[tool] = {
+            'accuracy': (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0,
+            'sensitivity': tp / (tp + fn) if (tp + fn) > 0 else 0,
+            'specificity': tn / (tn + fp) if (tn + fp) > 0 else 0,
+            'precision': tp / (tp + fp) if (tp + fp) > 0 else 0,
+            'f1': 0,
+            'confusion_matrix': tool_cm
+        }
+        tool_metrics[tool]['f1'] = 2 * tool_metrics[tool]['precision'] * tool_metrics[tool]['sensitivity'] / (
+            tool_metrics[tool]['precision'] + tool_metrics[tool]['sensitivity']
+        ) if (tool_metrics[tool]['precision'] + tool_metrics[tool]['sensitivity']) > 0 else 0
 
     metrics = {
         'accuracy': accuracy,
@@ -697,44 +668,34 @@ def evaluate_model(model, test_loader):
 
 
 def calibrate_model(model, val_loader):
-    """Calibrate model probabilities using Platt scaling"""
     model.eval()
-    features = []
-    labels = []
+    features, labels = [], []
 
     with torch.no_grad():
         for inputs, targets, _ in val_loader:
             inputs = inputs.to(DEVICE)
             outputs = model(inputs).cpu().numpy().flatten()
             features.extend(outputs)
-            labels.extend(targets.numpy().flatten())
+            labels.extend(targets.cpu().numpy().flatten())
 
     features = np.array(features).reshape(-1, 1)
     labels = np.array(labels)
-
-    # Train logistic regression for calibration
     lr = LogisticRegression(C=1.0)
-    # Remove cv='prefit' to allow proper fitting
-    calibrated_model = CalibratedClassifierCV(lr, method='sigmoid')  # Corrected line
+    calibrated_model = CalibratedClassifierCV(lr, method='sigmoid')
     calibrated_model.fit(features, labels)
-
     return calibrated_model
 
 
 def predict_with_calibration(model, calibrator, image_tensor):
-    """Make a calibrated prediction for a single image"""
     model.eval()
     with torch.no_grad():
         image_tensor = image_tensor.unsqueeze(0).to(DEVICE)
         raw_output = model(image_tensor).cpu().numpy().flatten()[0]
-
-    # Apply calibration
     calibrated_prob = calibrator.predict_proba(np.array([[raw_output]]))[0, 1]
     return raw_output, calibrated_prob
 
 
 def load_model(model_path):
-    """Load a model from a safetensors file"""
     model = StegoCNN().to(DEVICE)
     state_dict = load_file(model_path)
     model.load_state_dict(state_dict)
@@ -743,28 +704,27 @@ def load_model(model_path):
 
 
 def main():
-    # Data augmentation and preprocessing
     transform_train = transforms.Compose([
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
         transforms.RandomRotation(15),
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
 
     transform_val = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
 
-    # Define stego directories
     stego_dirs = {
-        "openstego": "ml/openstego/",
-        "steghide": "ml/steghide/",
-        "outguess": "ml/outguess/"
+        "openstego": "ml/stego/",
+        "steghide": "ml/stego_steghide/",
+        "outguess": "ml/stego_outguess/"
     }
 
-    # Create datasets
     train_dataset = StegoDataset(
         original_dir=ORIGINAL_DIR,
         original_jpg_dir=ORIGINAL_JPG_DIR,
@@ -781,46 +741,39 @@ def main():
         split='val'
     )
 
-    # Data loaders
     train_loader = DataLoader(
         train_dataset,
-        batch_size=16,
+        batch_size=28,  # 10.842 Gb VRAM usage
         shuffle=True,
         num_workers=4,
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=16,
+        batch_size=32,
         shuffle=False,
         num_workers=4,
         pin_memory=True
     )
 
-    # Create model
     model = StegoCNN().to(DEVICE)
-
-    # Loss function and optimizer
     criterion = FocalLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-3)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
-    # Train the model
     history = train_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
         criterion=criterion,
-        num_epochs=15,
-        mixup_alpha=0.2,
+        num_epochs=100,
         save_path="stego_model.safetensors"
     )
 
-    # Load best model
     model = load_model("stego_model.safetensors")
-
-    # Evaluate model
     metrics = evaluate_model(model, val_loader)
     print(f"Accuracy: {metrics['accuracy']:.4f}")
     print(f"Sensitivity (TPR): {metrics['sensitivity']:.4f}")
@@ -829,61 +782,79 @@ def main():
     print(f"F1 Score: {metrics['f1']:.4f}")
     print("Confusion Matrix:")
     print(metrics['confusion_matrix'])
-
-    # Tool-specific metrics
     print("\nTool-specific metrics:")
     for tool, tool_metrics in metrics['tool_metrics'].items():
         print(f"\n{tool}:")
         for metric_name, metric_value in tool_metrics.items():
-            if metric_name != 'confusion_matrix':
-                print(f"  {metric_name}: {metric_value:.4f}")
+            print(f"  {metric_name}: {metric_value:.4f}")
 
-    # Calibrate model
     calibrator = calibrate_model(model, val_loader)
+    with open("calibrator.pkl", "wb") as f:
+        pickle.dump(calibrator, f)
 
-    # Create a function for predicting new images
     def predict_stego(image_path):
         try:
-            # Load and preprocess image
             image = Image.open(image_path).convert('RGB')
             image_tensor = transform_val(image).to(DEVICE)
-
-            # Get raw model prediction and calibrated probability
             raw_score, calibrated_prob = predict_with_calibration(model, calibrator, image_tensor)
-
-            # Predict class
             is_stego = calibrated_prob > 0.5
-
-            # Try to identify the tool
-            if is_stego:
-                tool_identifier = ToolIdentifier(image_path)
-                stego_tool = tool_identifier.identify()
-            else:
-                stego_tool = None
-
+            tool_identifier = ToolIdentifier(image_path)
+            stego_tool = tool_identifier.identify() if is_stego else None
             result = {
                 'is_stego': bool(is_stego),
                 'raw_score': float(raw_score),
                 'calibrated_probability': float(calibrated_prob),
-                'stego_tool': stego_tool if is_stego else None,
+                'stego_tool': stego_tool
             }
-
             return result
         except Exception as e:
             print(f"Error processing {image_path}: {e}")
             return None
 
-    # Example usage of the predict function
-    # result = predict_stego("path/to/test/image.jpg")
-    # print(result)
+    image_paths = [
+        "test_openstego.bmp",
+        "test_steghide.bmp",
+        "test_outguess.jpg",
+        "test_unknown.bmp"
+    ]
 
-    # Save the calibrator
-    import pickle
-    with open("calibrator.pkl", "wb") as f:
-        pickle.dump(calibrator, f)
+    print("\nTesting predictions:")
+    clean_phash_map = build_clean_phash_map(ORIGINAL_DIR, ORIGINAL_JPG_DIR)
+    for path in image_paths:
+        if not os.path.exists(path):
+            print(f"{path}: File not found.")
+            continue
+        result = predict_stego(path)
+        if result:
+            print(f"{path}:")
+            print(f"  Is Stego: {result['is_stego']}")
+            print(f"  Calibrated Probability: {result['calibrated_probability']:.4f}")
+            print(f"  Stego Tool: {result['stego_tool']}")
+            stego_phash = phash_image(path)
+            if stego_phash:
+                closest_clean = min(clean_phash_map.items(), key=lambda kv: abs(stego_phash - kv[0]))
+                if abs(stego_phash - closest_clean[0]) <= 2:
+                    print(f"  Closest Clean Match: {closest_clean[1]}")
+                else:
+                    print(f"  No clean match found")
+
+    print("\nValidating dataset...")
+    sample_paths = [
+        "ml/clean/image1.bmp",
+        "ml/stego/image1.jpg.bmp",
+        "ml/stego_steghide/image1_steghide.bmp",
+        "ml/stego_outguess/image1_outguess.jpg"
+    ]
+    for path in sample_paths:
+        if not os.path.exists(path):
+            print(f"{path}: File not found")
+            continue
+        identifier = ToolIdentifier(path)
+        tool = identifier.identify()
+        print(f"{path}: Identified tool → {tool}")
 
     print("Training and evaluation complete. Model and calibrator saved.")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
