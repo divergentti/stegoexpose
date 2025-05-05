@@ -215,7 +215,7 @@ class OutGuessIdentifier:
         if not self.image_path.lower().endswith('.jpg'):
             return None
         coeffs = self.extract_dct_coefficients()
-        if coeffs is None or len(coeffs) == 0:
+        if coeffs is None or len(coffs) == 0:
             print(f"No valid DCT coefficients for {self.image_path}")
             return None
         lsb = (coeffs % 2).astype(int)
@@ -311,24 +311,28 @@ class StegoCNN(nn.Module):
     def __init__(self):
         super(StegoCNN, self).__init__()
         self.srm = SRMFilter()
-        self.conv1 = nn.Conv2d(12, 32, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        self.attn1 = AttentionBlock(128)
-        self.conv4 = nn.Conv2d(128, 256, 3, padding=1)
-        self.bn4 = nn.BatchNorm2d(256)
-        self.attn2 = AttentionBlock(256)
+        self.conv1 = nn.Conv2d(12, 24, 3, padding=1)  # Reduced channels
+        self.bn1 = nn.BatchNorm2d(24)
+        self.conv2 = nn.Conv2d(24, 48, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(48)
+        self.conv3 = nn.Conv2d(48, 96, 3, padding=1)
+        self.bn3 = nn.BatchNorm2d(96)
+        self.attn1 = AttentionBlock(96)
+        self.conv4 = nn.Conv2d(96, 192, 3, padding=1)
+        self.bn4 = nn.BatchNorm2d(192)
+        self.attn2 = AttentionBlock(192)
         self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(256 * 16 * 16, 512)
-        self.fc2 = nn.Linear(512, 1)
+        self.dropout = nn.Dropout(0.6)  # Increased dropout
+        self.fc1 = nn.Linear(192 * 16 * 16, 384)
+        self.fc2 = nn.Linear(384, 1)
         self._initialize_weights()
 
     def forward(self, x):
         x_srm = self.srm(x)
+        # Debug SRM output
+        if torch.any(torch.isnan(x_srm)) or torch.any(torch.isinf(x_srm)):
+            print("Warning: NaN or Inf in SRM output")
+        print(f"SRM Output Mean: {x_srm.mean().item():.4f}, Std: {x_srm.std().item():.4f}")
         x = torch.cat([x, x_srm], dim=1)
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.pool(x)
@@ -340,7 +344,7 @@ class StegoCNN(nn.Module):
         x = F.relu(self.bn4(self.conv4(x)))
         x = self.attn2(x)
         x = self.pool(x)
-        x = x.view(-1, 256 * 16 * 16)
+        x = x.view(-1, 192 * 16 * 16)
         x = self.dropout(F.relu(self.fc1(x)))
         x = self.fc2(x)
         return x
@@ -360,11 +364,11 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.5, gamma=1.5):
+    def __init__(self, alpha=0.5, gamma=1.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.class_weights = torch.tensor([1.5, 1.0]).to(DEVICE)  # Balanced weights
+        self.class_weights = torch.tensor([3.0, 1.0]).to(DEVICE)  # Higher weight for clean
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
@@ -464,6 +468,14 @@ class StegoDataset(Dataset):
             indices, train_size=train_ratio, stratify=labels, random_state=42, shuffle=True
         )
         self.indices = train_indices if split == 'train' else val_indices
+
+        # Oversample clean images in training set
+        if split == 'train':
+            clean_indices = [i for i in self.indices if self.data[i][2] == "clean"]
+            extra_clean_indices = clean_indices * 2  # Duplicate clean images twice
+            self.indices = self.indices + extra_clean_indices
+            print(f"After oversampling: {len(self.indices)} samples ({len(extra_clean_indices)} additional clean samples)")
+
         print(f"Dataset: {len(self.data)} total, {len(self.indices)} {'train' if split == 'train' else 'val'}")
 
     def __len__(self):
@@ -493,9 +505,8 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
     scaler = torch.amp.GradScaler('cuda') if DEVICE == 'cuda' else None
 
     for epoch in range(num_epochs):
-        # Learning rate warmup
         if epoch < 5:
-            lr = 1e-6 + (5e-5 - 1e-6) * epoch / 5
+            lr = 1e-6 + (3e-5 - 1e-6) * epoch / 5
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
@@ -529,7 +540,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
             train_labels.extend(targets.cpu().numpy())
 
             if batch_idx == 0:
-                print(f"Epoch {epoch + 1}, Sample Probs: {probs[:4].cpu().detach().numpy()}")
+                print(f"Epoch {epoch + 1}, Sample Probs: {probs[:4].cpu().detach().numpy().flatten()}")
                 print(f"Epoch {epoch + 1}, Sample Labels: {targets[:4].cpu().detach().numpy()}")
 
         train_loss = train_loss / train_total
@@ -617,8 +628,8 @@ def evaluate_model(model, test_loader):
     all_scores = np.array(all_scores).flatten()
 
     accuracy = (all_preds == all_targets).mean()
-    cm = confusion_matrix(all_targets, all_preds)
-    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+    cm = confusion_matrix(all_targets, all_preds, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
 
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
@@ -635,8 +646,8 @@ def evaluate_model(model, test_loader):
 
         tool_preds = all_preds[tool_indices]
         tool_targets = all_targets[tool_indices]
-        tool_cm = confusion_matrix(tool_targets, tool_preds, labels=[0, 1]) if len(tool_preds) > 0 else np.zeros((2, 2))
-        tn, fp, fn, tp = tool_cm.ravel() if tool_cm.size == 4 else (0, 0, 0, 0)
+        tool_cm = confusion_matrix(tool_targets, tool_preds, labels=[0, 1])
+        tn, fp, fn, tp = tool_cm.ravel()
 
         tool_metrics[tool] = {
             'accuracy': (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0,
@@ -704,6 +715,9 @@ def load_model(model_path):
 
 
 def main():
+    if DEVICE == 'cuda':
+        torch.cuda.empty_cache()
+
     transform_train = transforms.Compose([
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
@@ -743,7 +757,7 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=28,  # 10.842 Gb VRAM usage
+        batch_size=28,
         shuffle=True,
         num_workers=4,
         pin_memory=True,
@@ -752,7 +766,7 @@ def main():
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=32,
+        batch_size=28,
         shuffle=False,
         num_workers=4,
         pin_memory=True
@@ -760,7 +774,7 @@ def main():
 
     model = StegoCNN().to(DEVICE)
     criterion = FocalLoss()
-    optimizer = optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=3e-5, weight_decay=5e-3)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
     history = train_model(
@@ -848,13 +862,14 @@ def main():
     for path in sample_paths:
         if not os.path.exists(path):
             print(f"{path}: File not found")
-            continue
-        identifier = ToolIdentifier(path)
-        tool = identifier.identify()
-        print(f"{path}: Identified tool → {tool}")
+        else:
+            identifier = ToolIdentifier(path)
+            tool = identifier.identify()
+            print(f"{path}: Identified tool → {tool}")
 
     print("Training and evaluation complete. Model and calibrator saved.")
+    return history, metrics
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    history, metrics = main()
