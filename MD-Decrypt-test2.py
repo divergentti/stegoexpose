@@ -13,6 +13,11 @@ from scipy.stats import chisquare
 import imagehash
 from sklearn.metrics import confusion_matrix
 import torchvision
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning)  # Suppress scipy warnings
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using {DEVICE}")
@@ -22,7 +27,11 @@ MAGIC_NUMBER = b"OPENSTEGO"
 
 
 def phash_image(path):
-    return imagehash.phash(Image.open(path).convert("RGB"))
+    try:
+        return imagehash.phash(Image.open(path).convert("RGB"))
+    except Exception as e:
+        print(f"Failed to hash {path}: {e}")
+        return None
 
 
 def build_clean_phash_map(clean_dir, clean_jpg_dir):
@@ -33,11 +42,9 @@ def build_clean_phash_map(clean_dir, clean_jpg_dir):
         for fname in os.listdir(dir_path):
             if fname.lower().endswith(('.bmp', '.jpg', '.jpeg', '.png')):
                 full_path = os.path.join(dir_path, fname)
-                try:
-                    ph = phash_image(full_path)
+                ph = phash_image(full_path)
+                if ph is not None:
                     phash_map[ph] = full_path
-                except Exception as e:
-                    print(f"Failed to hash {fname}: {e}")
     return phash_map
 
 
@@ -67,8 +74,12 @@ class JavaRandom:
 class OpenStegoRandomLSB:
     def __init__(self, stego_image_path: str, password: str = None):
         self.stego_image_path = stego_image_path
-        self.stego_image = Image.open(stego_image_path).convert("RGB")
-        self.stego_np = np.array(self.stego_image)
+        try:
+            self.stego_image = Image.open(stego_image_path).convert("RGB")
+            self.stego_np = np.array(self.stego_image)
+        except Exception as e:
+            print(f"Error loading {stego_image_path}: {e}")
+            self.stego_np = None
         self.magic = MAGIC_NUMBER
 
     def bits_to_bytes(self, bits: list) -> bytes:
@@ -82,6 +93,8 @@ class OpenStegoRandomLSB:
         return bytes(bytes_out)
 
     def extract_bits_randomly(self, stego_np, seed: int, num_bits: int, channel_mapping=None) -> list:
+        if stego_np is None:
+            return []
         height, width, channels = stego_np.shape
         rand = JavaRandom(seed)
         used_positions = set()
@@ -105,6 +118,8 @@ class OpenStegoRandomLSB:
         return extracted_bits
 
     def identify(self, seed: int = 98234782, bits_to_extract: int = 336) -> str:
+        if self.stego_np is None:
+            return None
         channel_mapping = [2, 1, 0]
         extracted_bits = self.extract_bits_randomly(self.stego_np, seed, bits_to_extract, channel_mapping)
         extracted_bytes = self.bits_to_bytes(extracted_bits)
@@ -116,10 +131,16 @@ class OpenStegoRandomLSB:
 class SteghideIdentifier:
     def __init__(self, image_path):
         self.image_path = image_path
-        self.image = Image.open(image_path).convert("RGB")
-        self.np_image = np.array(self.image)
+        try:
+            self.image = Image.open(image_path).convert("RGB")
+            self.np_image = np.array(self.image)
+        except Exception as e:
+            print(f"Error loading {image_path}: {e}")
+            self.np_image = None
 
     def extract_sequential_lsb(self, np_img, num_bits):
+        if np_img is None:
+            return []
         height, width, _ = np_img.shape
         extracted_bits = []
         for y in range(height):
@@ -141,10 +162,14 @@ class SteghideIdentifier:
             bytes_out.append(byte)
         return bytes(bytes_out)
 
-    def identify(self, num_bits=2048):
+    def identify(self, num_bits=4096):  # Increased num_bits for better detection
         bits = self.extract_sequential_lsb(self.np_image, num_bits)
+        if not bits:
+            return None
         byte_data = self.bits_to_bytes(bits)
-        if any(b in byte_data for b in [b'\x00\x00', b'\xFF\xFF', b'.txt', b'temp']):
+        # Broader patterns for Steghide
+        patterns = [b'\x00\x00', b'\xFF\xFF', b'.txt', b'temp', b'\x00\x01', b'\x01\x00']
+        if any(b in byte_data for b in patterns):
             return "Steghide"
         return None
 
@@ -156,7 +181,7 @@ class OutGuessIdentifier:
             self.image = Image.open(image_path).convert("RGB")
             self.np_image = np.array(self.image)
         except Exception as e:
-            print(f"Error loading image {image_path}: {e}")
+            print(f"Error loading {image_path}: {e}")
             self.np_image = None
 
     def extract_dct_coefficients(self):
@@ -178,6 +203,9 @@ class OutGuessIdentifier:
                 block = img[i:i+8, j:j+8]
                 coeff = dct(dct(block.T, norm='ortho').T, norm='ortho')
                 coeffs.append(coeff.flatten())
+        if not coeffs:
+            print(f"No DCT coefficients extracted for {self.image_path}")
+            return None
         coeffs = np.concatenate(coeffs)
         return coeffs
 
@@ -188,11 +216,13 @@ class OutGuessIdentifier:
         if coeffs is None or len(coeffs) == 0:
             print(f"No valid DCT coefficients for {self.image_path}")
             return None
+        # Ensure binary LSB values
         lsb = (coeffs % 2).astype(int)
-        counts = np.bincount(lsb, minlength=2)
+        lsb = np.clip(lsb, 0, 1)  # Force values to 0 or 1
+        counts = np.bincount(lsb, minlength=2)[:2]  # Take only first two bins
         expected = np.array([len(lsb) / 2] * 2)
         if counts.shape != expected.shape:
-            print(f"Shape mismatch in chisquare: counts={counts.shape}, expected={expected.shape}")
+            print(f"Shape mismatch in chisquare: counts={counts.shape}, expected={expected.shape}, lsb={np.unique(lsb)}")
             return None
         try:
             chi2, p = chisquare(counts, expected)
@@ -241,13 +271,19 @@ class SRMFilter(nn.Module):
               [ 1, -8, 20, -8,  1],
               [ 0,  2, -8,  2,  0],
               [ 0,  0,  1,  0,  0]]],  # Square kernel
+            [[[ 0,  0,  0,  0,  0],
+              [ 0,  0,  1,  0,  0],
+              [ 0,  1, -4,  1,  0],
+              [ 0,  0,  1,  0,  0],
+              [ 0,  0,  0,  0,  0]]],  # Cross kernel
         ], dtype=torch.float32)
-        self.conv = nn.Conv2d(3, 9, kernel_size=5, padding=2, bias=False)
-        weights = torch.zeros(9, 3, 5, 5)
+        self.conv = nn.Conv2d(3, 12, kernel_size=5, padding=2, bias=False)
+        weights = torch.zeros(12, 3, 5, 5)
         for i in range(3):
-            weights[i*3, i] = srm_kernels[0]
-            weights[i*3+1, i] = srm_kernels[1]
-            weights[i*3+2, i] = srm_kernels[2]
+            weights[i*4, i] = srm_kernels[0]
+            weights[i*4+1, i] = srm_kernels[1]
+            weights[i*4+2, i] = srm_kernels[2]
+            weights[i*4+3, i] = srm_kernels[3]
         self.conv.weight = nn.Parameter(weights, requires_grad=False)
 
     def forward(self, x):
@@ -279,20 +315,17 @@ class StegoCNN(nn.Module):
     def __init__(self):
         super(StegoCNN, self).__init__()
         self.srm = SRMFilter()
-        self.conv1 = nn.Conv2d(12, 32, 3, padding=1)  # 3 RGB + 9 SRM
+        self.conv1 = nn.Conv2d(15, 32, 3, padding=1)  # 3 RGB + 12 SRM
         self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
         self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
         self.bn3 = nn.BatchNorm2d(128)
         self.attn1 = AttentionBlock(128)
-        self.conv4 = nn.Conv2d(128, 256, 3, padding=1)
-        self.bn4 = nn.BatchNorm2d(256)
-        self.attn2 = AttentionBlock(256)
         self.pool = nn.MaxPool2d(2, 2)
         self.dropout = nn.Dropout(0.6)
-        self.fc1 = nn.Linear(256 * 16 * 16, 512)
-        self.fc2 = nn.Linear(512, 1)
+        self.fc1 = nn.Linear(128 * 32 * 32, 256)  # Reduced complexity
+        self.fc2 = nn.Linear(256, 1)
         self._initialize_weights()
 
     def forward(self, x):
@@ -305,10 +338,7 @@ class StegoCNN(nn.Module):
         x = F.relu(self.bn3(self.conv3(x)))
         x = self.attn1(x)
         x = self.pool(x)
-        x = F.relu(self.bn4(self.conv4(x)))
-        x = self.attn2(x)
-        x = self.pool(x)
-        x = x.view(-1, 256 * 16 * 16)
+        x = x.view(-1, 128 * 32 * 32)
         x = self.dropout(F.relu(self.fc1(x)))
         x = self.fc2(x)
         return x
@@ -328,10 +358,11 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.5, gamma=1.5):
+    def __init__(self, alpha=0.75, gamma=1.5):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.class_weights = torch.tensor([2.0, 1.0]).to(DEVICE)  # Weight clean higher
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
@@ -339,6 +370,8 @@ class FocalLoss(nn.Module):
         BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
         pt = torch.exp(-BCE_loss)
         F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+        weights = self.class_weights[targets.long()]
+        F_loss = F_loss * weights
         return F_loss.mean()
 
 
@@ -453,7 +486,7 @@ class Training:
     def __init__(self, model: nn.Module, device: str = 'cpu'):
         self.model = model.to(device)
         self.device = device
-        self.criterion = FocalLoss(alpha=0.5, gamma=1.5)
+        self.criterion = FocalLoss(alpha=0.75, gamma=1.5)
         self.optimizer = optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-3)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=60)
         self.scaler = torch.amp.GradScaler('cuda')
@@ -467,6 +500,25 @@ class Training:
         self.best_val_loss = float('inf')
         self.patience = 10
         self.epochs_no_improve = 0
+        self.calibrator = None
+
+    def calibrate(self, val_loader):
+        self.model.eval()
+        probs = []
+        labels = []
+        with torch.no_grad():
+            for images, targets in val_loader:
+                images, targets = images.to(self.device), targets.to(self.device)
+                outputs = self.model(images).view(-1)
+                probs.extend(torch.sigmoid(outputs).cpu().numpy())
+                labels.extend(targets.cpu().numpy())
+        probs = np.array(probs).reshape(-1, 1)
+        labels = np.array(labels)
+        self.calibrator = CalibratedClassifierCV(
+            LogisticRegression(), cv=5, method='sigmoid'
+        )
+        self.calibrator.fit(probs, labels)
+        print("Probability calibrator trained")
 
     def train(self, original_dir: str, original_jpg_dir: str, stego_dirs: dict, epochs: int = 60, batch_size: int = 16):
         train_dataset = StegoDataset(original_dir, original_jpg_dir, stego_dirs, self.transform, split='train', train_ratio=0.7)
@@ -501,7 +553,7 @@ class Training:
 
                 train_loss += loss.item() * images.size(0)
                 probs = torch.sigmoid(outputs)
-                preds = (probs >= 0.5).float()  # Lowered threshold for better recall
+                preds = (probs >= 0.7).float()  # Higher threshold
                 train_correct += (preds == labels).sum().item()
                 train_total += labels.size(0)
                 train_preds.extend(preds.cpu().numpy())
@@ -538,7 +590,7 @@ class Training:
 
                     val_loss += loss.item() * images.size(0)
                     probs = torch.sigmoid(outputs)
-                    preds = (probs >= 0.5).float()
+                    preds = (probs >= 0.7).float()
                     val_correct += (preds == labels).sum().item()
                     val_total += labels.size(0)
                     val_preds.extend(preds.cpu().numpy())
@@ -570,6 +622,7 @@ class Training:
                 self.epochs_no_improve += 1
                 if self.epochs_no_improve >= self.patience:
                     print(f"Early stopping at epoch {epoch + 1}")
+                    self.calibrate(val_loader)  # Calibrate before stopping
                     break
 
             print(f"Current LR: {self.optimizer.param_groups[0]['lr']:.6f}")
@@ -597,7 +650,9 @@ class Training:
         with torch.no_grad():
             output = self.model(img).view(-1)
             prob = torch.sigmoid(output).item()
-        prediction = "Stego" if prob >= 0.5 else "Clean"
+            if self.calibrator is not None:
+                prob = self.calibrator.predict_proba(np.array([[prob]]))[0, 1]
+        prediction = "Stego" if prob >= 0.7 else "Clean"
         return prob, prediction
 
 
@@ -656,6 +711,9 @@ if __name__ == '__main__':
 
         try:
             stego_phash = phash_image(path)
+            if stego_phash is None:
+                print(f"{path}: Failed to compute phash")
+                continue
             closest_clean = min(clean_phash_map.items(), key=lambda kv: abs(stego_phash - kv[0]))
             if abs(stego_phash - closest_clean[0]) <= 2:
                 clean_path = closest_clean[1]
