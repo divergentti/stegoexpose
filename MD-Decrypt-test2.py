@@ -128,6 +128,7 @@ class OpenStegoRandomLSB:
         extracted_bits = self.extract_bits_randomly(self.stego_np, seed, bits_to_extract, channel_mapping)
         extracted_bytes = self.bits_to_bytes(extracted_bits)
         if extracted_bytes[:len(self.magic)] == self.magic:
+            print(f"OpenStego identified for {self.stego_image_path}")
             return "OpenStego"
         return None
 
@@ -171,9 +172,11 @@ class SteghideIdentifier:
         if not bits:
             return None
         byte_data = self.bits_to_bytes(bits)
-        patterns = [b'\x00\x00\x00', b'\xFF\xFF\xFF', b'steghide', b'.txt\x00']
-        if any(b in byte_data for b in patterns):
-            return "Steghide"
+        patterns = [b'steghide', b'.txt\x00']  # Tighter patterns
+        for pattern in patterns:
+            if pattern in byte_data:
+                print(f"Steghide identified for {self.image_path} with pattern {pattern}")
+                return "Steghide"
         return None
 
 
@@ -222,7 +225,9 @@ class OutGuessIdentifier:
         expected = np.array([len(lsb) / 2] * 2)
         try:
             chi2, p = chisquare(counts, expected)
-            if p > 0.05:
+            print(f"OutGuess chi-square for {self.image_path}: p={p:.4f}")
+            if p > 0.1:  # Stricter threshold
+                print(f"OutGuess identified for {self.image_path}")
                 return "OutGuess"
         except Exception as e:
             print(f"Chisquare error for {self.image_path}: {e}")
@@ -231,6 +236,7 @@ class OutGuessIdentifier:
 
 class ToolIdentifier:
     def __init__(self, image_path):
+        self.image_path = image_path
         self.identifiers = [
             OpenStegoRandomLSB(image_path),
             SteghideIdentifier(image_path),
@@ -245,6 +251,7 @@ class ToolIdentifier:
                     return result
             except Exception as e:
                 print(f"Identifier error for {identifier.__class__.__name__}: {e}")
+        print(f"No tool identified for {self.image_path}")
         return "Unknown"
 
 
@@ -267,7 +274,7 @@ class SRMFilter(nn.Module):
               [ 1, -8, 20, -8,  1],
               [ 0,  2, -8,  2,  0],
               [ 0,  0,  1,  0,  0]]],  # Square kernel
-        ], dtype=torch.float32) * 2.0  # Amplify kernels
+        ], dtype=torch.float32) * 1.5  # Reduced amplification
         srm_kernels = srm_kernels / srm_kernels.abs().sum(dim=(2, 3), keepdim=True)
         self.conv = nn.Conv2d(3, 9, kernel_size=5, padding=2, bias=False)
         weights = torch.zeros(9, 3, 5, 5)
@@ -317,7 +324,7 @@ class StegoCNN(nn.Module):
         self.bn4 = nn.BatchNorm2d(192)
         self.attn2 = AttentionBlock(192)
         self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.5)  # Reduced dropout
+        self.dropout = nn.Dropout(0.6)  # Increased dropout
         self.fc1 = nn.Linear(192 * 16 * 16, 384)
         self.fc2 = nn.Linear(384, 1)
         self._initialize_weights()
@@ -327,8 +334,9 @@ class StegoCNN(nn.Module):
         if torch.any(torch.isnan(x_srm)) or torch.any(torch.isinf(x_srm)):
             print("Warning: NaN or Inf in SRM output")
         if is_clean is not None:
-            label = "clean" if is_clean else "stego"
-            print(f"SRM Output ({label}) Mean: {x_srm.mean().item():.4f}, Std: {x_srm.std().item():.4f}")
+            for i in range(len(is_clean)):
+                label = "clean" if is_clean[i] else "stego"
+                print(f"SRM Output ({label}) Mean: {x_srm[i].mean().item():.4f}, Std: {x_srm[i].std().item():.4f}")
         x = torch.cat([x, x_srm], dim=1)
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.pool(x)
@@ -360,11 +368,11 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.5, gamma=1.5):
+    def __init__(self, alpha=0.5, gamma=1.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.class_weights = torch.tensor([1.5, 1.0]).to(DEVICE)  # Balanced weights
+        self.class_weights = torch.tensor([3.0, 1.0]).to(DEVICE)  # Higher clean weight
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
@@ -468,7 +476,7 @@ class StegoDataset(Dataset):
         # Oversample clean images in training set
         if split == 'train':
             clean_indices = [i for i in self.indices if self.data[i][2] == "clean"]
-            extra_clean_indices = clean_indices  # Oversample once
+            extra_clean_indices = clean_indices * 2  # Oversample twice
             self.indices = self.indices + extra_clean_indices
             print(f"After oversampling: {len(self.indices)} samples ({len(extra_clean_indices)} additional clean samples)")
 
@@ -495,39 +503,44 @@ class StegoDataset(Dataset):
 
 def train_model(model, train_loader, val_loader, optimizer, criterion, num_epochs=100, save_path=None):
     best_val_loss = float('inf')
-    patience = 20  # Increased patience
+    patience = 20
     epochs_no_improve = 0
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     scaler = torch.amp.GradScaler('cuda') if DEVICE == 'cuda' else None
+    accum_steps = 2  # Gradient accumulation for effective batch size 56
 
     for epoch in range(num_epochs):
-        if epoch < 5:
-            lr = 1e-6 + (3e-5 - 1e-6) * epoch / 5
+        if epoch < 10:  # Extended warmup
+            lr = 1e-6 + (1e-5 - 1e-6) * epoch / 10
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
         train_preds, train_labels = [], []
+        optimizer.zero_grad()
 
         for batch_idx, (inputs, targets, _) in enumerate(train_loader):
             inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
-            optimizer.zero_grad()
             with torch.amp.autocast('cuda') if DEVICE == 'cuda' else torch.no_grad():
-                outputs = model(inputs, is_clean=(targets[0] == 0))
-                loss = criterion(outputs, targets)
+                outputs = model(inputs, is_clean=targets == 0)
+                loss = criterion(outputs, targets) / accum_steps
             if scaler:
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                scaler.step(optimizer)
-                scaler.update()
+                if (batch_idx + 1) % accum_steps == 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                optimizer.step()
+                if (batch_idx + 1) % accum_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-            train_loss += loss.item() * inputs.size(0)
+            train_loss += loss.item() * inputs.size(0) * accum_steps
             probs = torch.sigmoid(outputs)
             preds = (probs > 0.5).float()
             train_correct += (preds == targets).sum().item()
@@ -544,7 +557,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
         print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-        cm = confusion_matrix(train_labels, train_preds)
+        cm = confusion_matrix(train_labels, train_preds, labels=[0, 1])
         print(f"Train Confusion Matrix:\n{cm}")
 
         model.eval()
@@ -557,7 +570,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
             for inputs, targets, tools in val_loader:
                 inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
                 with torch.amp.autocast('cuda') if DEVICE == 'cuda' else torch.no_grad():
-                    outputs = model(inputs, is_clean=(targets[0] == 0))
+                    outputs = model(inputs, is_clean=targets == 0)
                     loss = criterion(outputs, targets)
 
                 val_loss += loss.item() * inputs.size(0)
@@ -587,6 +600,21 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
         for tool in tool_correct:
             acc = tool_correct[tool] / tool_total[tool] if tool_total[tool] > 0 else 0
             print(f"{tool}: {acc:.4f} ({tool_correct[tool]}/{tool_total[tool]})")
+
+        # Save confusion matrix plot
+        plt.figure(figsize=(6, 4))
+        plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        plt.title(f"Epoch {epoch + 1} Validation Confusion Matrix")
+        plt.colorbar()
+        plt.xticks([0, 1], ['Clean', 'Stego'])
+        plt.yticks([0, 1], ['Clean', 'Stego'])
+        for i in range(2):
+            for j in range(2):
+                plt.text(j, i, cm[i, j], ha='center', va='center', color='black')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.savefig(f"confusion_matrix_epoch_{epoch + 1}.png")
+        plt.close()
 
         if val_loss < best_val_loss and save_path:
             best_val_loss = val_loss
@@ -618,6 +646,11 @@ def evaluate_model(model, test_loader):
             all_targets.extend(targets.cpu().numpy())
             all_scores.extend(scores.cpu().numpy())
             all_tools.extend(tools)
+
+            # Print sample probs and labels
+            if len(all_preds) <= 8:  # First few samples
+                print(f"Eval Sample Probs: {scores[:4].cpu().numpy().flatten()}")
+                print(f"Eval Sample Labels: {targets[:4].cpu().numpy()}")
 
     all_preds = np.array(all_preds).flatten()
     all_targets = np.array(all_targets).flatten()
@@ -700,7 +733,7 @@ def calibrate_model(model, val_loader):
 
     features = np.array(features).reshape(-1, 1)
     labels = np.array(labels)
-    lr = LogisticRegression(C=1.0)
+    lr = LogisticRegression(C=0.1)  # Stronger regularization
     calibrated_model = CalibratedClassifierCV(lr, method='sigmoid')
     calibrated_model.fit(features, labels)
     return calibrated_model
@@ -783,7 +816,7 @@ def main():
 
     model = StegoCNN().to(DEVICE)
     criterion = FocalLoss()
-    optimizer = optim.Adam(model.parameters(), lr=3e-5, weight_decay=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1e-5, weight_decay=5e-3)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
 
     history = train_model(
@@ -837,12 +870,21 @@ def main():
             print(f"Error processing {image_path}: {e}")
             return None
 
+    # Verify test images with ToolIdentifier
+    print("\nVerifying test images with ToolIdentifier:")
     image_paths = [
         "test_openstego.bmp",
         "test_steghide.bmp",
         "test_outguess.jpg",
         "test_unknown.bmp"
     ]
+    for path in image_paths:
+        if not os.path.exists(path):
+            print(f"{path}: File not found.")
+            continue
+        identifier = ToolIdentifier(path)
+        tool = identifier.identify()
+        print(f"{path}: Identified tool → {tool}")
 
     print("\nTesting predictions:")
     clean_phash_map = build_clean_phash_map(ORIGINAL_DIR, ORIGINAL_JPG_DIR)
@@ -886,4 +928,3 @@ def main():
 
 if __name__ == "__main__":
     history, metrics = main()
-
