@@ -367,11 +367,11 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.5, gamma=1.5):
+    def __init__(self, alpha=0.8, gamma=2.0):  # Increased alpha for clean class
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.class_weights = torch.tensor([1.5, 1.0]).to(DEVICE)  # Balanced weights
+        self.class_weights = torch.tensor([2.0, 1.0]).to(DEVICE)  # Higher weight for clean
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
@@ -468,7 +468,11 @@ class StegoDataset(Dataset):
         labels = [label for _, label, _ in self.data]
         indices = list(range(len(self.data)))
         train_indices, val_indices = train_test_split(
-            indices, train_size=train_ratio, stratify=labels, random_state=42
+            indices,
+            train_size=train_ratio,
+            stratify=labels,
+            random_state=42,
+            shuffle=True  # Ensure shuffling before split
         )
         self.indices = train_indices if split == 'train' else val_indices
         print(f"Dataset: {len(self.data)} total, {len(train_indices)} train, {len(val_indices)} val")
@@ -496,18 +500,19 @@ class Training:
         self.model = model.to(device)
         self.device = device
         self.criterion = FocalLoss(alpha=0.5, gamma=1.5)
-        self.optimizer = optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-3)
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=100)
+        self.optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)  # Higher initial LR
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=5)
         self.scaler = torch.amp.GradScaler('cuda')
         self.transform = transforms.Compose([
             transforms.Resize((256, 256)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(10),
+            transforms.RandomApply([transforms.GaussianBlur(3)], p=0.3),  # New
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
         self.best_val_loss = float('inf')
-        self.patience = 15
+        self.patience = 30
         self.epochs_no_improve = 0
         self.calibrator = None
         self.warmup_epochs = 5
@@ -702,8 +707,9 @@ if __name__ == '__main__':
             original_jpg_dir=ORIGINAL_JPG_DIR,
             stego_dirs=stego_dirs,
             epochs=100,
-            batch_size=16 # 32 cause CUDA out of memory
+            batch_size=16 # 32 cause CUDA out of memory, 16 ~ 6.8Gb VRAM usage
         )
+
         trainer.save_model("model_temp.safetensors")
         os.replace("model_temp.safetensors", "model.safetensors")
 
