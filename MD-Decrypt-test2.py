@@ -17,6 +17,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 import warnings
 import pickle
+import matplotlib.pyplot as plt
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -193,9 +194,6 @@ class OutGuessIdentifier:
         img = self.np_image[:, :, 0]
         img = img.astype(float) - 128
         h, w = img.shape
-        if h < 8 or w < 8:
-            print(f"Image {self.image_path} too small: {h}x{w}")
-            return None
         h = h - h % 8
         w = w - w % 8
         img = img[:h, :w]
@@ -215,16 +213,13 @@ class OutGuessIdentifier:
         if not self.image_path.lower().endswith('.jpg'):
             return None
         coeffs = self.extract_dct_coefficients()
-        if coeffs is None or len(coffs) == 0:
+        if coeffs is None or len(coeffs) == 0:
             print(f"No valid DCT coefficients for {self.image_path}")
             return None
         lsb = (coeffs % 2).astype(int)
         lsb = np.clip(lsb, 0, 1)
         counts = np.bincount(lsb, minlength=2)[:2]
         expected = np.array([len(lsb) / 2] * 2)
-        if counts.shape != expected.shape:
-            print(f"Shape mismatch in chisquare: counts={counts.shape}, expected={expected.shape}, lsb={np.unique(lsb)}")
-            return None
         try:
             chi2, p = chisquare(counts, expected)
             if p > 0.05:
@@ -272,7 +267,7 @@ class SRMFilter(nn.Module):
               [ 1, -8, 20, -8,  1],
               [ 0,  2, -8,  2,  0],
               [ 0,  0,  1,  0,  0]]],  # Square kernel
-        ], dtype=torch.float32)
+        ], dtype=torch.float32) * 2.0  # Amplify kernels
         srm_kernels = srm_kernels / srm_kernels.abs().sum(dim=(2, 3), keepdim=True)
         self.conv = nn.Conv2d(3, 9, kernel_size=5, padding=2, bias=False)
         weights = torch.zeros(9, 3, 5, 5)
@@ -311,7 +306,7 @@ class StegoCNN(nn.Module):
     def __init__(self):
         super(StegoCNN, self).__init__()
         self.srm = SRMFilter()
-        self.conv1 = nn.Conv2d(12, 24, 3, padding=1)  # Reduced channels
+        self.conv1 = nn.Conv2d(12, 24, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(24)
         self.conv2 = nn.Conv2d(24, 48, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(48)
@@ -322,17 +317,18 @@ class StegoCNN(nn.Module):
         self.bn4 = nn.BatchNorm2d(192)
         self.attn2 = AttentionBlock(192)
         self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.6)  # Increased dropout
+        self.dropout = nn.Dropout(0.5)  # Reduced dropout
         self.fc1 = nn.Linear(192 * 16 * 16, 384)
         self.fc2 = nn.Linear(384, 1)
         self._initialize_weights()
 
-    def forward(self, x):
+    def forward(self, x, is_clean=None):
         x_srm = self.srm(x)
-        # Debug SRM output
         if torch.any(torch.isnan(x_srm)) or torch.any(torch.isinf(x_srm)):
             print("Warning: NaN or Inf in SRM output")
-        print(f"SRM Output Mean: {x_srm.mean().item():.4f}, Std: {x_srm.std().item():.4f}")
+        if is_clean is not None:
+            label = "clean" if is_clean else "stego"
+            print(f"SRM Output ({label}) Mean: {x_srm.mean().item():.4f}, Std: {x_srm.std().item():.4f}")
         x = torch.cat([x, x_srm], dim=1)
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.pool(x)
@@ -364,11 +360,11 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.5, gamma=1.0):
+    def __init__(self, alpha=0.5, gamma=1.5):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.class_weights = torch.tensor([3.0, 1.0]).to(DEVICE)  # Higher weight for clean
+        self.class_weights = torch.tensor([1.5, 1.0]).to(DEVICE)  # Balanced weights
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
@@ -472,7 +468,7 @@ class StegoDataset(Dataset):
         # Oversample clean images in training set
         if split == 'train':
             clean_indices = [i for i in self.indices if self.data[i][2] == "clean"]
-            extra_clean_indices = clean_indices * 2  # Duplicate clean images twice
+            extra_clean_indices = clean_indices  # Oversample once
             self.indices = self.indices + extra_clean_indices
             print(f"After oversampling: {len(self.indices)} samples ({len(extra_clean_indices)} additional clean samples)")
 
@@ -499,7 +495,7 @@ class StegoDataset(Dataset):
 
 def train_model(model, train_loader, val_loader, optimizer, criterion, num_epochs=100, save_path=None):
     best_val_loss = float('inf')
-    patience = 15
+    patience = 20  # Increased patience
     epochs_no_improve = 0
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     scaler = torch.amp.GradScaler('cuda') if DEVICE == 'cuda' else None
@@ -518,7 +514,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
             inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
             optimizer.zero_grad()
             with torch.amp.autocast('cuda') if DEVICE == 'cuda' else torch.no_grad():
-                outputs = model(inputs)
+                outputs = model(inputs, is_clean=(targets[0] == 0))
                 loss = criterion(outputs, targets)
             if scaler:
                 scaler.scale(loss).backward()
@@ -561,7 +557,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
             for inputs, targets, tools in val_loader:
                 inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
                 with torch.amp.autocast('cuda') if DEVICE == 'cuda' else torch.no_grad():
-                    outputs = model(inputs)
+                    outputs = model(inputs, is_clean=(targets[0] == 0))
                     loss = criterion(outputs, targets)
 
                 val_loss += loss.item() * inputs.size(0)
@@ -585,7 +581,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
         history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
         print(f"Epoch {epoch + 1}/{num_epochs} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
-        cm = confusion_matrix(val_labels, val_preds)
+        cm = confusion_matrix(val_labels, val_preds, labels=[0, 1])
         print(f"Val Confusion Matrix:\n{cm}")
         print("Tool-specific Val Acc:")
         for tool in tool_correct:
@@ -635,6 +631,19 @@ def evaluate_model(model, test_loader):
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     f1 = 2 * precision * sensitivity / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
+
+    # Plot probability histogram
+    clean_scores = all_scores[all_targets == 0]
+    stego_scores = all_scores[all_targets == 1]
+    plt.figure(figsize=(8, 6))
+    plt.hist(clean_scores, bins=50, alpha=0.5, label='Clean', color='blue')
+    plt.hist(stego_scores, bins=50, alpha=0.5, label='Stego', color='red')
+    plt.title('Validation Probability Distribution')
+    plt.xlabel('Calibrated Probability')
+    plt.ylabel('Frequency')
+    plt.legend()
+    plt.savefig('probability_histogram.png')
+    plt.close()
 
     tool_metrics = {}
     for tool in set(all_tools):
@@ -774,8 +783,8 @@ def main():
 
     model = StegoCNN().to(DEVICE)
     criterion = FocalLoss()
-    optimizer = optim.Adam(model.parameters(), lr=3e-5, weight_decay=5e-3)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+    optimizer = optim.Adam(model.parameters(), lr=3e-5, weight_decay=1e-3)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
 
     history = train_model(
         model=model,
@@ -800,7 +809,10 @@ def main():
     for tool, tool_metrics in metrics['tool_metrics'].items():
         print(f"\n{tool}:")
         for metric_name, metric_value in tool_metrics.items():
-            print(f"  {metric_name}: {metric_value:.4f}")
+            if metric_name == 'confusion_matrix':
+                print(f"  {metric_name}:\n{metric_value}")
+            else:
+                print(f"  {metric_name}: {metric_value:.4f}")
 
     calibrator = calibrate_model(model, val_loader)
     with open("calibrator.pkl", "wb") as f:
@@ -843,6 +855,7 @@ def main():
             print(f"{path}:")
             print(f"  Is Stego: {result['is_stego']}")
             print(f"  Calibrated Probability: {result['calibrated_probability']:.4f}")
+            print(f"  Raw Score: {result['raw_score']:.4f}")
             print(f"  Stego Tool: {result['stego_tool']}")
             stego_phash = phash_image(path)
             if stego_phash:
@@ -873,3 +886,4 @@ def main():
 
 if __name__ == "__main__":
     history, metrics = main()
+
