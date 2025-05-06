@@ -8,21 +8,23 @@ import torchvision.transforms as transforms
 from safetensors.torch import save_file, load_file
 import numpy as np
 import torch.nn.functional as F
-import re
 from scipy.stats import chisquare
 import imagehash
 from sklearn.metrics import confusion_matrix
-import torchvision
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 import warnings
 import pickle
+import matplotlib
+matplotlib.use('Agg')  # Use Agg backend (non-GUI)
 import matplotlib.pyplot as plt
 import pandas as pd
 import random
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="tkinter")
 warnings.filterwarnings("ignore", category=UserWarning)
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -406,7 +408,7 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.5, gamma=2.0):
+    def __init__(self, alpha=0.63, gamma=2.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -489,6 +491,7 @@ class StegoDataset(Dataset):
             image = Image.open(img_path).convert('RGB')
             if self.transform:
                 image = self.transform(image)
+            image.close()
             return image, torch.tensor(label, dtype=torch.float32), tool
         except Exception as e:
             if debug_StegoDataset:
@@ -499,7 +502,7 @@ class StegoDataset(Dataset):
             return blank, torch.tensor(0.0, dtype=torch.float32), "failed"
 
 
-def train_model(model, train_loader, val_loader, optimizer, criterion, num_epochs=100, save_path=None):
+def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler, num_epochs=100, save_path=None):
     best_val_loss = float('inf')
     patience = 20
     epochs_no_improve = 0
@@ -507,10 +510,16 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
     scaler = torch.amp.GradScaler('cuda') if DEVICE == 'cuda' else None
 
     for epoch in range(num_epochs):
+        # Manual warmup for the first 5 epochs
         if epoch < 5:  # 5-epoch warmup
             lr = 1e-6 + (3e-5 - 1e-6) * epoch / 5
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
+        # After warmup, let the scheduler handle the learning rate
+        elif epoch == 5:
+            # Reset the learning rate to the initial value after warmup
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = 3e-5  # Match the initial lr in optimizer
 
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
@@ -615,6 +624,13 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
                 if debug_train_model:
                     print(f"Early stopping at epoch {epoch + 1}")
                 break
+
+        # Step the scheduler after each epoch (after warmup)
+        if epoch >= 5:  # Start using the scheduler after the warmup phase
+            scheduler.step()
+            if debug_train_model:
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"Epoch {epoch + 1} Learning Rate: {current_lr:.6f}")
 
     return history
 
@@ -840,7 +856,8 @@ def main():
     model = StegoCNN().to(DEVICE)
     criterion = FocalLoss()
     optimizer = optim.Adam(model.parameters(), lr=3e-5, weight_decay=1e-2)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
 
     history = train_model(
         model=model,
@@ -848,10 +865,10 @@ def main():
         val_loader=val_loader,
         optimizer=optimizer,
         criterion=criterion,
+        scheduler=scheduler,
         num_epochs=100,
-        save_path=MODEL_PATH+MODEL_FILE
+        save_path=MODEL_PATH + MODEL_FILE
     )
-
     model = load_model(MODEL_PATH+MODEL_FILE)
     metrics = evaluate_model(model, val_loader)
 
