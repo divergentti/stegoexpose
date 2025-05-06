@@ -42,12 +42,22 @@ SECRET_MESSAGE_FILE = "./training/embeds/testfile.txt"
 STEGO_METADATA_FILE = "./training/stego_metadata.csv"
 VERIFY_MESSAGE_PATH = "./training/extracted/verify.txt"
 
+debug_phash = True
+debug_OpenStegoRandomLSB = True
+debug_SteghideIdentifier=True
+debug_OutGuessIdentifier=True
+debug_ToolIdentifier=True
+debug_StegoCNN=True
+debug_StegoDataset=True
+debug_train_model=True
+debug_evaluate_model=True
 
 def phash_image(path):
     try:
         return imagehash.phash(Image.open(path).convert("RGB"))
     except Exception as e:
-        print(f"Failed to hash {path}: {e}")
+        if debug_phash:
+            print(f"Failed to hash {path}: {e}")
         return None
 
 
@@ -95,7 +105,8 @@ class OpenStegoRandomLSB:
             self.stego_image = Image.open(stego_image_path).convert("RGB")
             self.stego_np = np.array(self.stego_image)
         except Exception as e:
-            print(f"Error loading {stego_image_path}: {e}")
+            if debug_OpenStegoRandomLSB:
+                print(f"Error loading {stego_image_path}: {e}")
             self.stego_np = None
         self.magic = MAGIC_NUMBER
 
@@ -141,7 +152,8 @@ class OpenStegoRandomLSB:
         extracted_bits = self.extract_bits_randomly(self.stego_np, seed, bits_to_extract, channel_mapping)
         extracted_bytes = self.bits_to_bytes(extracted_bits)
         if extracted_bytes[:len(self.magic)] == self.magic:
-            print(f"OpenStego identified for {self.stego_image_path}")
+            if debug_OpenStegoRandomLSB:
+                print(f"OpenStego identified for {self.stego_image_path}")
             return "OpenStego"
         return None
 
@@ -153,7 +165,8 @@ class SteghideIdentifier:
             self.image = Image.open(image_path).convert("RGB")
             self.np_image = np.array(self.image)
         except Exception as e:
-            print(f"Error loading {image_path}: {e}")
+            if debug_SteghideIdentifier:
+                print(f"Error loading {image_path}: {e}")
             self.np_image = None
 
     def extract_sequential_lsb(self, np_img, num_bits):
@@ -188,7 +201,8 @@ class SteghideIdentifier:
         patterns = [b'steghide', b'.txt\x00']
         for pattern in patterns:
             if pattern in byte_data:
-                print(f"Steghide identified for {self.image_path} with pattern {pattern}")
+                if debug_SteghideIdentifier:
+                    print(f"Steghide identified for {self.image_path} with pattern {pattern}")
                 return "Steghide"
         return None
 
@@ -200,7 +214,8 @@ class OutGuessIdentifier:
             self.image = Image.open(image_path).convert("RGB")
             self.np_image = np.array(self.image)
         except Exception as e:
-            print(f"Error loading {image_path}: {e}")
+            if debug_OutGuessIdentifier:
+                print(f"Error loading {image_path}: {e}")
             self.np_image = None
 
     def extract_dct_coefficients(self):
@@ -220,7 +235,8 @@ class OutGuessIdentifier:
                 coeff = dct(dct(block.T, norm='ortho').T, norm='ortho')
                 coeffs.append(coeff.flatten())
         if not coeffs:
-            print(f"No DCT coefficients extracted for {self.image_path}")
+            if debug_OutGuessIdentifier:
+                print(f"No DCT coefficients extracted for {self.image_path}")
             return None
         coeffs = np.concatenate(coeffs)
         return coeffs
@@ -230,7 +246,8 @@ class OutGuessIdentifier:
             return None
         coeffs = self.extract_dct_coefficients()
         if coeffs is None or len(coeffs) == 0:
-            print(f"No valid DCT coefficients for {self.image_path}")
+            if debug_OutGuessIdentifier:
+                print(f"No valid DCT coefficients for {self.image_path}")
             return None
         lsb = (coeffs % 2).astype(int)
         lsb = np.clip(lsb, 0, 1)
@@ -238,12 +255,15 @@ class OutGuessIdentifier:
         expected = np.array([len(lsb) / 2] * 2)
         try:
             chi2, p = chisquare(counts, expected)
-            print(f"OutGuess chi-square for {self.image_path}: p={p:.4f}")
+            if debug_OutGuessIdentifier:
+                print(f"OutGuess chi-square for {self.image_path}: p={p:.4f}")
             if p > 0.1:
-                print(f"OutGuess identified for {self.image_path}")
+                if debug_OutGuessIdentifier:
+                    print(f"OutGuess identified for {self.image_path}")
                 return "OutGuess"
         except Exception as e:
-            print(f"Chisquare error for {self.image_path}: {e}")
+            if debug_OutGuessIdentifier:
+                print(f"Chisquare error for {self.image_path}: {e}")
         return None
 
 
@@ -263,8 +283,10 @@ class ToolIdentifier:
                 if result:
                     return result
             except Exception as e:
-                print(f"Identifier error for {identifier.__class__.__name__}: {e}")
-        print(f"No tool identified for {self.image_path}")
+                if debug_ToolIdentifier:
+                    print(f"Identifier error for {identifier.__class__.__name__}: {e}")
+        if debug_ToolIdentifier:
+            print(f"No tool identified for {self.image_path}")
         return "Unknown"
 
 
@@ -345,11 +367,13 @@ class StegoCNN(nn.Module):
     def forward(self, x, is_clean=None):
         x_srm = self.srm(x)
         if torch.any(torch.isnan(x_srm)) or torch.any(torch.isinf(x_srm)):
-            print("Warning: NaN or Inf in SRM output")
+            if debug_StegoCNN:
+                print("Warning: NaN or Inf in SRM output")
         if is_clean is not None:
             for i in range(len(is_clean)):
                 label = "clean" if is_clean[i] else "stego"
-                print(f"SRM Output ({label}) Mean: {x_srm[i].mean().item():.4f}, Std: {x_srm[i].std().item():.4f}")
+                if debug_StegoCNN:
+                    print(f"SRM Output ({label}) Mean: {x_srm[i].mean().item():.4f}, Std: {x_srm[i].std().item():.4f}")
         x = torch.cat([x, x_srm], dim=1)
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.pool(x)
@@ -412,7 +436,8 @@ class StegoDataset(Dataset):
             if os.path.isfile(full_path):
                 self.data.append((full_path, 0.0, "clean"))
 
-        print(f"Loaded {len(original_files)} clean images from {original_dir}")
+        if debug_StegoDataset:
+            print(f"Loaded {len(original_files)} clean images from {original_dir}")
 
         # Add stego images from metadata CSV
         if not os.path.exists(STEGO_METADATA_FILE):
@@ -422,16 +447,19 @@ class StegoDataset(Dataset):
             tool = row['tool']
             fname = row['outfile']
             if tool not in stego_dirs:
-                print(f"Unknown tool '{tool}' in metadata")
+                if debug_StegoDataset:
+                    print(f"Unknown tool '{tool}' in metadata")
                 continue
             full_path = os.path.join(stego_dirs[tool], fname)
             if os.path.isfile(full_path):
                 self.data.append((full_path, 1.0, tool))
             else:
-                print(f"Stego file not found: {full_path}")
+                if debug_StegoDataset:
+                    print(f"Stego file not found: {full_path}")
 
         if not self.data:
-            raise ValueError("No image data found for training.")
+            if debug_StegoDataset:
+                raise ValueError("No image data found for training.")
 
         from sklearn.model_selection import train_test_split
         labels = [label for _, label, _ in self.data]
@@ -444,9 +472,11 @@ class StegoDataset(Dataset):
         if split == 'train':
             clean_indices = [i for i in self.indices if self.data[i][2] == "clean"]
             self.indices += clean_indices  # simple oversampling
-            print(f"Oversampled clean images: +{len(clean_indices)}")
+            if debug_StegoDataset:
+                print(f"Oversampled clean images: +{len(clean_indices)}")
 
-        print(f"Final dataset size: {len(self.indices)} ({split})")
+        if debug_StegoDataset:
+            print(f"Final dataset size: {len(self.indices)} ({split})")
 
     def __len__(self):
         return len(self.indices)
@@ -460,7 +490,8 @@ class StegoDataset(Dataset):
                 image = self.transform(image)
             return image, torch.tensor(label, dtype=torch.float32), tool
         except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
+            if debug_StegoDataset:
+                print(f"Error loading image {img_path}: {e}")
             blank = Image.new('RGB', (256, 256), color='black')
             if self.transform:
                 blank = self.transform(blank)
@@ -510,16 +541,19 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
             train_labels.extend(targets.cpu().numpy())
 
             if batch_idx == 0:
-                print(f"Epoch {epoch + 1}, Sample Probs: {probs[:4].cpu().detach().numpy().flatten()}")
-                print(f"Epoch {epoch + 1}, Sample Labels: {targets[:4].cpu().detach().numpy()}")
+                if debug_train_model:
+                    print(f"Epoch {epoch + 1}, Sample Probs: {probs[:4].cpu().detach().numpy().flatten()}")
+                    print(f"Epoch {epoch + 1}, Sample Labels: {targets[:4].cpu().detach().numpy()}")
 
         train_loss = train_loss / train_total
         train_acc = train_correct / train_total
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
-        print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+        if debug_train_model:
+            print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
         cm = confusion_matrix(train_labels, train_preds, labels=[0, 1])
-        print(f"Train Confusion Matrix:\n{cm}")
+        if debug_train_model:
+            print(f"Train Confusion Matrix:\n{cm}")
 
         if (epoch + 1) % 5 == 0:  # Print validation every 5 epochs
             model.eval()
@@ -545,9 +579,11 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
             val_acc = val_correct / val_total
             history['val_loss'].append(val_loss)
             history['val_acc'].append(val_acc)
-            print(f"Epoch {epoch + 1}/{num_epochs} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
+            if debug_train_model:
+                print(f"Epoch {epoch + 1}/{num_epochs} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
             cm = confusion_matrix(val_labels, val_preds, labels=[0, 1])
-            print(f"Val Confusion Matrix:\n{cm}")
+            if debug_train_model:
+                print(f"Val Confusion Matrix:\n{cm}")
 
             plt.figure(figsize=(6, 4))
             plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
@@ -568,13 +604,15 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, num_epoch
                 epochs_no_improve = 0
                 state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
                 save_file(state_dict, save_path)
-                print(f"Saved best model to {save_path}")
+                if debug_train_model:
+                    print(f"Saved best model to {save_path}")
             else:
                 epochs_no_improve += 5  # Account for 5 epochs between validations
 
             # Early stopping check
             if epochs_no_improve >= patience:
-                print(f"Early stopping at epoch {epoch + 1}")
+                if debug_train_model:
+                    print(f"Early stopping at epoch {epoch + 1}")
                 break
 
     return history
@@ -597,8 +635,9 @@ def evaluate_model(model, test_loader):
             all_tools.extend(tools)
 
             if len(all_preds) <= 8:  # First few samples
-                print(f"Eval Sample Probs: {scores[:4].cpu().numpy().flatten()}")
-                print(f"Eval Sample Labels: {targets[:4].cpu().numpy()}")
+                if debug_evaluate_model:
+                    print(f"Eval Sample Probs: {scores[:4].cpu().numpy().flatten()}")
+                    print(f"Eval Sample Labels: {targets[:4].cpu().numpy()}")
 
     all_preds = np.array(all_preds).flatten()
     all_targets = np.array(all_targets).flatten()
@@ -705,8 +744,6 @@ def load_model(model_path):
 
 
 def main():
-
-
     if DEVICE == 'cuda':
         torch.cuda.empty_cache()
 
@@ -779,6 +816,7 @@ def main():
 
     model = load_model(MODEL_PATH+MODEL_FILE)
     metrics = evaluate_model(model, val_loader)
+
     print(f"Accuracy: {metrics['accuracy']:.4f}")
     print(f"Sensitivity (TPR): {metrics['sensitivity']:.4f}")
     print(f"Specificity (TNR): {metrics['specificity']:.4f}")
