@@ -29,7 +29,9 @@ print(f"Using {DEVICE}")
 MAGIC_NUMBER = b"OPENSTEGO"
 PASSPHRASE = "set"
 
-MODEL_PATH = ".training/models/"
+MODEL_PATH = "./training/models/"
+os.makedirs(MODEL_PATH, exist_ok=True)
+
 MODEL_FILE = "stegomodel.safetensors"
 CALIBRATOR_FILE= "calibrator.pkl"
 ORIGINAL_DIR = "./training/originals/"
