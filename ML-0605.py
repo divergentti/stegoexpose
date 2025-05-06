@@ -408,11 +408,11 @@ class StegoCNN(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.63, gamma=2.0):
+    def __init__(self, alpha=0.53, gamma=2.0):  # Favor stego class
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.class_weights = torch.tensor([1.5, 1.0]).to(DEVICE)
+        self.class_weights = torch.tensor([1.0, 1.5]).to(DEVICE)
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
@@ -474,9 +474,10 @@ class StegoDataset(Dataset):
 
         if split == 'train':
             clean_indices = [i for i in self.indices if self.data[i][2] == "clean"]
-            self.indices += clean_indices  # simple oversampling
+            num_stego = len([i for i in self.indices if self.data[i][2] != "clean"])
+            self.indices += random.sample(clean_indices, min(len(clean_indices), num_stego))  # Match stego count
             if debug_StegoDataset:
-                print(f"Oversampled clean images: +{len(clean_indices)}")
+                print(f"Oversampled clean images: +{min(len(clean_indices), num_stego)}")
 
         if debug_StegoDataset:
             print(f"Final dataset size: {len(self.indices)} ({split})")
@@ -568,6 +569,10 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
         cm = confusion_matrix(train_labels, train_preds, labels=[0, 1])
         if debug_train_model:
             print(f"Train Confusion Matrix:\n{cm}")
+
+        if debug_train_model and epoch % 5 == 0:
+            stego_correct = sum(1 for p, t in zip(train_preds, train_labels) if t == 1 and p == t)
+            print(f"Epoch {epoch + 1} | Stego Correct: {stego_correct}/{sum(1 for t in train_labels if t == 1)}")
 
         if (epoch + 1) % 5 == 0:  # Print validation every 5 epochs
             model.eval()
