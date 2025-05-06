@@ -362,7 +362,7 @@ class StegoCNN(nn.Module):
         self.bn4 = nn.BatchNorm2d(192)
         self.attn2 = AttentionBlock(192)
         self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.6)
+        self.dropout = nn.Dropout(0.52)
         self.fc1 = nn.Linear(192 * 16 * 16, 384)
         self.fc2 = nn.Linear(384, 1)
         self._initialize_weights()
@@ -412,7 +412,7 @@ class FocalLoss(nn.Module):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.class_weights = torch.tensor([1.0, 1.5]).to(DEVICE)
+        self.class_weights = torch.tensor([1.0, 1.2]).to(DEVICE)
 
     def forward(self, inputs, targets):
         inputs = inputs.view(-1)
