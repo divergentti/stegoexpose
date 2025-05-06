@@ -19,6 +19,7 @@ import warnings
 import pickle
 import matplotlib.pyplot as plt
 import pandas as pd
+import random
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -743,6 +744,43 @@ def load_model(model_path):
     return model
 
 
+def get_random_image_paths(metadata_file, stego_dirs, original_dir, num_samples=5):
+    # Read the metadata CSV
+    df = pd.read_csv(metadata_file)
+
+    # Randomly sample rows
+    sampled_rows = df.sample(n=num_samples, random_state=42)  # random_state for reproducibility
+
+    # Extract paths
+    image_paths = []
+    sample_paths = []
+
+    for _, row in sampled_rows.iterrows():
+        # Add stego image path
+        tool = row['tool']
+        stego_path = os.path.join(stego_dirs.get(tool, original_dir), row['outfile'])
+        if os.path.exists(stego_path):
+            image_paths.append(stego_path)
+            sample_paths.append(stego_path)
+
+        # Add original image path (if not already included)
+        original_path = os.path.join(original_dir, row['original'])
+        if os.path.exists(original_path) and original_path not in image_paths:
+            image_paths.append(original_path)
+            sample_paths.append(original_path)
+
+    # Ensure we have at least num_samples unique paths
+    while len(image_paths) < num_samples:
+        additional_row = df.sample(n=1, random_state=random.randint(1, 1000)).iloc[0]
+        tool = additional_row['tool']
+        stego_path = os.path.join(stego_dirs.get(tool, original_dir), additional_row['outfile'])
+        if os.path.exists(stego_path) and stego_path not in image_paths:
+            image_paths.append(stego_path)
+            sample_paths.append(stego_path)
+
+    return image_paths[:num_samples], sample_paths[:num_samples]
+
+
 def main():
     if DEVICE == 'cuda':
         torch.cuda.empty_cache()
@@ -856,10 +894,11 @@ def main():
             print(f"Error processing {image_path}: {e}")
             return None
 
+    # Get random paths
+    num_samples = 5  # Adjust this number as needed
+    image_paths, sample_paths = get_random_image_paths(STEGO_METADATA_FILE, stego_dirs, ORIGINAL_DIR, num_samples)
+
     print("\nVerifying test images with ToolIdentifier:")
-    image_paths = [
-        # Pick randomly from STEGOMETADATA.CSV some files
-    ]
     for path in image_paths:
         if not os.path.exists(path):
             print(f"{path}: File not found.")
@@ -894,9 +933,6 @@ def main():
                     print(f"  No clean match found")
 
     print("\nValidating dataset...")
-    sample_paths = [
-        # Pick randomly from STEGOMETADATA.CSV some files
-    ]
     for path in sample_paths:
         if not os.path.exists(path):
             print(f"{path}: File not found")
