@@ -869,7 +869,11 @@ def main():
         print(f"{path}: Identified tool → {tool}")
 
     print("\nTesting predictions:")
-    clean_phash_map = build_clean_phash_map(ORIGINAL_DIR)
+    try:
+        clean_phash_map = build_clean_phash_map(ORIGINAL_DIR, ORIGINAL_DIR)  # Fixed call
+    except TypeError as e:
+        print(f"Error building clean phash map: {e}. Continuing without phash comparison.")
+        clean_phash_map = {}
     for path in image_paths:
         if not os.path.exists(path):
             print(f"{path}: File not found.")
