@@ -488,11 +488,16 @@ class StegoDataset(Dataset):
         actual_idx = self.indices[idx]
         img_path, label, tool = self.data[actual_idx]
         try:
-            image = Image.open(img_path).convert('RGB')
-            if self.transform:
-                image = self.transform(image)
-            image.close()
-            return image, torch.tensor(label, dtype=torch.float32), tool
+            # Open and close the PIL.Image immediately, but keep data for transformation
+            with Image.open(img_path).convert('RGB') as image:
+                # Ensure the image is loaded into memory before closing
+                image_data = np.array(image)  # Convert to numpy array
+                if self.transform:
+                    # Apply transform to the numpy array or re-open image if needed
+                    transformed_image = self.transform(Image.fromarray(image_data))
+                else:
+                    transformed_image = torch.from_numpy(image_data.transpose((2, 0, 1))).float() / 255.0
+            return transformed_image, torch.tensor(label, dtype=torch.float32), tool
         except Exception as e:
             if debug_StegoDataset:
                 print(f"Error loading image {img_path}: {e}")
@@ -500,7 +505,6 @@ class StegoDataset(Dataset):
             if self.transform:
                 blank = self.transform(blank)
             return blank, torch.tensor(0.0, dtype=torch.float32), "failed"
-
 
 def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler, num_epochs=100, save_path=None):
     best_val_loss = float('inf')
