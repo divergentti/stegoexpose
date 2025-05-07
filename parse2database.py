@@ -485,6 +485,7 @@ class StegoTraceAnalyzer:
         results['lsb_avg_changed_pct'] = np.mean(changes)
         return results
 
+
     def save_trace_results_to_db(self, stego_id, trace_results: dict):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
@@ -527,6 +528,45 @@ class StegoTraceAnalyzer:
         return results
 
     @staticmethod
+    def run_trace_analysis_for_clean_images(db_path: str):
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+
+        # Hae kaikki original-kuvat, joita ei ole käytetty stego-kuvissa
+        c.execute("""
+            SELECT id, filename
+            FROM originals
+            WHERE id NOT IN (SELECT DISTINCT original_id FROM stego_images)
+        """)
+        clean_images = c.fetchall()
+        conn.close()
+
+        print(f"[INFO] Found {len(clean_images)} clean images to analyze.")
+
+        for orig_id, orig_path in clean_images:
+            try:
+                if debug_stegotraceanalyzer:
+                    print(f"[TRACE] Processing clean original_id = {orig_id}")
+                # Käytetään samaa polkua sekä orig että stego – koska meillä ei ole vertailukuvaa
+                trace = StegoTraceAnalyzer(orig_path, orig_path, db_path)
+                results = trace.run_all()
+
+                # Tallennetaan 'clean' tieto stego_images-tauluun ilman stegokuvaa
+                conn = sqlite3.connect(db_path)
+                c = conn.cursor()
+                c.execute("""
+                    INSERT INTO stego_images (original_id, filename, tool, filetype, shape_mismatch)
+                    VALUES (?, ?, NULL, ?, 0)
+                """, (orig_id, orig_path, os.path.splitext(orig_path)[1].lstrip('.').lower()))
+                stego_id = c.lastrowid
+                conn.commit()
+                conn.close()
+
+                trace.save_trace_results_to_db(stego_id, results)
+
+            except Exception as e:
+                print(f"[ERROR] Failed to analyze clean original_id {orig_id}: {e}")
+
     @staticmethod
     def run_trace_analysis_for_all(db_path: str):
         conn = sqlite3.connect(db_path)
@@ -538,7 +578,7 @@ class StegoTraceAnalyzer:
         for sid in stego_ids:
             try:
                 if debug_stegotraceanalyzer:
-                    print(f"[TRACE] Processing stego_id = {sid}")
+                    print(f"[TRACE] Processing stego_id = {sid} ... wait ... slow ...")
                 trace = StegoTraceAnalyzer.from_database(db_path, stego_id=sid)
                 summary = trace.run_all()
                 trace.save_trace_results_to_db(sid, summary)
@@ -586,8 +626,8 @@ def main():
         print(f"{k}: {v}")
                 """
 
-    StegoTraceAnalyzer.run_trace_analysis_for_all(ANALYSIS_DB_FILE)
-
+    # StegoTraceAnalyzer.run_trace_analysis_for_all(ANALYSIS_DB_FILE)
+    StegoTraceAnalyzer.run_trace_analysis_for_clean_images(ANALYSIS_DB_FILE)
 
 
 if __name__ == "__main__":
