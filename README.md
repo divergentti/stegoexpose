@@ -76,7 +76,7 @@ python run_dual_prediction_test.py
 
 - Improve feature normalization and balance for clean/stego classification
 - Integrate GUI to visualize traces, differences, and classification confidence
-- Add support for custom tools (e.g., Jari's encoder)
+- Add support for custom tools (e.g., Jari's [encoder](https://github.com/divergentti/steganography))
 - Bundle as CLI and GUI hybrid app for forensic analysts
 
 ---
