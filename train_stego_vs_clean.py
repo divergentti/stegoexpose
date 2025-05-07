@@ -11,6 +11,16 @@ DB_PATH = "./training/database/steganalysis.db"
 MODEL_PATH = "./training/models/rf_clean_vs_stego.pkl"
 
 def load_trace_dataframe(db_path: str) -> pd.DataFrame:
+    """
+    Load trace analysis results from the database, joining stego image metadata
+    with extracted feature traces.
+
+    Args:
+        db_path (str): Path to the SQLite database.
+
+    Returns:
+        pd.DataFrame: Feature data joined with stego class labels.
+    """
     conn = sqlite3.connect(db_path)
     df = pd.read_sql_query("""
         SELECT 
@@ -26,13 +36,15 @@ def load_trace_dataframe(db_path: str) -> pd.DataFrame:
     conn.close()
 
     df['shape_mismatch'] = df['shape_mismatch'].astype(int)
-
-    # Uusi luokittelu: stego / clean
     df['stego_class'] = df['tool'].apply(lambda x: 'clean' if x is None else 'stego')
 
     return df
 
 def main():
+    """
+    Main function for training a classifier to distinguish stego vs clean images
+    based on statistical trace analysis features.
+    """
     print("[INFO] Loading data...")
     df = load_trace_dataframe(DB_PATH)
     print(f"[INFO] Loaded {len(df)} records")

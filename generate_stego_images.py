@@ -297,7 +297,7 @@ import subprocess
 from PIL import Image
 import pandas as pd
 
-# Directories and file paths
+# Paths and configuration
 ORIGINAL_DIR = "./training/originals/"
 STEGO_OPENSTEGA_DIR = "./training/openstego/"
 STEGO_STEGHIDE_DIR = "./training/steghide/"
@@ -307,70 +307,44 @@ PASSPHRASE = "set"
 STEGO_METADATA_FILE = "./training/stego_metadata.csv"
 VERIFY_MESSAGE_PATH = "./training/extracted/verify.txt"
 
-# Create output directories if they don't exist
+# Create output directories if missing
 os.makedirs(STEGO_OPENSTEGA_DIR, exist_ok=True)
 os.makedirs(STEGO_STEGHIDE_DIR, exist_ok=True)
 os.makedirs(STEGO_OUTGUESS_DIR, exist_ok=True)
 os.makedirs("./training/extracted/", exist_ok=True)
 
-# Filetype support matrix per tool
+# Supported input/output formats for each tool
 filetype_matrix = {
     "openstego": {
         "input": ["bmp", "png", "jpg"],
-        "output": {
-            "bmp": "bmp",
-            "png": "png",
-            "jpg": "bmp"
-        }
+        "output": {"bmp": "bmp", "png": "png", "jpg": "bmp"}
     },
     "steghide": {
         "input": ["bmp", "jpg", "wav", "au"],
-        "output": {
-            "bmp": "bmp",
-            "jpg": "jpg",
-            "wav": "wav",
-            "au": "au"
-        }
+        "output": {"bmp": "bmp", "jpg": "jpg", "wav": "wav", "au": "au"}
     },
     "outguess": {
         "input": ["jpg", "ppm", "pnm", "pgm", "pbm"],
-        "output": {
-            "jpg": "jpg",
-            "ppm": "ppm",
-            "pnm": "pnm",
-            "pgm": "pgm",
-            "pbm": "pbm"
-        }
+        "output": {"jpg": "jpg", "ppm": "ppm", "pnm": "pnm", "pgm": "pgm", "pbm": "pbm"}
     }
 }
 
-# Utility to convert BMP to JPEG
+# Convert BMP to JPEG for outguess compatibility
+
 def convert_to_jpeg(input_path, output_path):
     img = Image.open(input_path).convert("RGB")
     img.save(output_path, "JPEG", quality=95)
 
-# Verify extraction success
+# Attempt to extract and verify message from stego image
+
 def verify_extraction(tool, stego_path):
     try:
         if tool == "steghide":
-            cmd = [
-                "steghide", "extract",
-                "-sf", stego_path,
-                "-xf", VERIFY_MESSAGE_PATH,
-                "-p", PASSPHRASE,
-                "-f"
-            ]
+            cmd = ["steghide", "extract", "-sf", stego_path, "-xf", VERIFY_MESSAGE_PATH, "-p", PASSPHRASE, "-f"]
         elif tool == "openstego":
-            cmd = [
-                "openstego", "extract",
-                "-sf", stego_path,
-                "-xf", VERIFY_MESSAGE_PATH,
-                "-p", PASSPHRASE
-            ]
+            cmd = ["openstego", "extract", "-sf", stego_path, "-xf", VERIFY_MESSAGE_PATH, "-p", PASSPHRASE]
         elif tool == "outguess":
-            cmd = [
-                "outguess", "-r", stego_path, VERIFY_MESSAGE_PATH
-            ]
+            cmd = ["outguess", "-r", stego_path, VERIFY_MESSAGE_PATH]
         else:
             return False
 
@@ -381,13 +355,10 @@ def verify_extraction(tool, stego_path):
     except Exception:
         return False
 
-# Track stego operations
+# Process each image in ORIGINAL_DIR
 metadata_records = []
-
-# Get list of original images
 original_files = sorted([f for f in os.listdir(ORIGINAL_DIR) if os.path.isfile(os.path.join(ORIGINAL_DIR, f))])
 
-# Process each image
 for idx, original_file in enumerate(original_files, 1):
     original_path = os.path.join(ORIGINAL_DIR, original_file)
     base_name, ext = os.path.splitext(original_file)
@@ -454,7 +425,7 @@ for idx, original_file in enumerate(original_files, 1):
         except subprocess.CalledProcessError as e:
             print(f"[OpenStego Error] {original_file}: {e.stderr.decode()}")
 
-# Save metadata CSV
+# Save metadata to CSV
 if metadata_records:
     df = pd.DataFrame(metadata_records)
     df.to_csv(STEGO_METADATA_FILE, index=False)

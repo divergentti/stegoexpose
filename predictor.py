@@ -1,24 +1,29 @@
 import joblib
 import pandas as pd
 from parse2database import StegoTraceAnalyzer
+from stegofeatureextractor import StegoFeatureExtractor
 
 MODEL_PATH = "./training/models/rf_clean_vs_stego.pkl"
+SINGLE_MODEL_PATH = "./training/models/rf_single_clean_vs_stego.pkl"
 DB_PATH = "./training/database/steganalysis.db"
 
-
-
 def predict_from_images(original_path: str, stego_path: str):
+    """
+    Predict the steganography tool used by comparing a stego image to its original.
+
+    Args:
+        original_path (str): Path to the original image.
+        stego_path (str): Path to the stego image.
+
+    Returns:
+        dict: Contains prediction, confidence, and class probabilities.
+    """
     trace = StegoTraceAnalyzer(original_path, stego_path, DB_PATH)
     features = trace.run_all()
 
-    # Lataa malli
     clf = joblib.load(MODEL_PATH)
+    df = pd.DataFrame([features]).reindex(columns=clf.feature_names_in_, fill_value=0.0)
 
-    # Muunna piirteet DataFrameksi ja varmista oikea järjestys
-    df = pd.DataFrame([features])
-    df = df.reindex(columns=clf.feature_names_in_, fill_value=0.0)
-
-    # Ennustus
     pred = clf.predict(df)[0]
     proba = clf.predict_proba(df)[0]
     confidence = float(max(proba))
@@ -29,23 +34,23 @@ def predict_from_images(original_path: str, stego_path: str):
         "probabilities": dict(zip(clf.classes_, proba))
     }
 
-
-
 def predict_clean_or_stego(image_path: str):
-    print(f"[INFO] Analyzing image: {image_path}")
+    """
+    Predict whether an image is clean or stego by comparing it to itself (used with relative features).
 
-    # Käytetään samaa kuvaa sekä orig että "stego", koska ei ole vertailukuvaa
+    Args:
+        image_path (str): Path to the image file.
+
+    Returns:
+        dict: Contains prediction, confidence, and class probabilities.
+    """
+    print(f"[INFO] Analyzing image: {image_path}")
     trace = StegoTraceAnalyzer(image_path, image_path, DB_PATH)
     features = trace.run_all()
 
-    # Lataa malli
     clf = joblib.load(MODEL_PATH)
+    df = pd.DataFrame([features]).reindex(columns=clf.feature_names_in_, fill_value=0.0)
 
-    # Valmistellaan ominaisuudet oikeaan järjestykseen
-    df = pd.DataFrame([features])
-    df = df.reindex(columns=clf.feature_names_in_, fill_value=0.0)
-
-    # Ennustus
     pred = clf.predict(df)[0]
     proba = clf.predict_proba(df)[0]
     confidence = float(max(proba))
@@ -56,8 +61,43 @@ def predict_clean_or_stego(image_path: str):
         "probabilities": dict(zip(clf.classes_, proba))
     }
 
+def predict_single_clean_or_stego(image_path: str):
+    """
+    Predict whether a single image is clean or stego using absolute feature analysis.
+
+    Args:
+        image_path (str): Path to the image file.
+
+    Returns:
+        dict: Contains prediction, confidence, and class probabilities.
+    """
+    print(f"[INFO] Analyzing single image: {image_path}")
+    extractor = StegoFeatureExtractor(image_path)
+    features = extractor.extract_features()
+
+    clf = joblib.load(SINGLE_MODEL_PATH)
+    df = pd.DataFrame([features]).reindex(columns=clf.feature_names_in_, fill_value=0.0)
+
+    pred = clf.predict(df)[0]
+    proba = clf.predict_proba(df)[0]
+    confidence = float(max(proba))
+
+    return {
+        "prediction": pred,
+        "confidence": confidence,
+        "probabilities": dict(zip(clf.classes_, proba))
+    }
 
 def debug_trace_features(image_path: str):
+    """
+    Run trace analysis on a single image and print each feature with debug markers.
+
+    Args:
+        image_path (str): Path to the image to be analyzed.
+
+    Returns:
+        dict: Extracted feature values.
+    """
     print(f"[DEBUG] Running trace analysis for: {image_path}")
     trace = StegoTraceAnalyzer(image_path, image_path, DB_PATH)
     features = trace.run_all()
@@ -72,82 +112,4 @@ def debug_trace_features(image_path: str):
         else:
             print(f"  {key}: {value}")
 
-    missing = set(trace.run_all().__annotations__.keys()) - set(features.keys())
-    if missing:
-        print(f"\n[WARNING] Missing features: {missing}")
-
     return features
-
-debug_trace_features("./training/testimages/openstegografana.png")
-
-
-
-"""
-
-print("Predicting used tool, new images out of dataset compared to original image...\n")
-
-print("Predicting Outguess encrypted file...")
-result = predict_from_images(
-    "./training/testimages/original2.jpg",
-    "./training/testimages/outguess.jpg"
-)
-print("Tool predicted:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Full probabilities:", result["probabilities"])
-
-print("Predicting Openstego encrypted file...")
-result = predict_from_images(
-    "./training/testimages/original.png",
-    "./training/testimages/openstego.png"
-)
-print("Tool predicted:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Full probabilities:", result["probabilities"])
-
-print("Predicting Steghide encrypted file...")
-
-result = predict_from_images(
-    "./training/testimages/original2.jpg",
-    "./training/testimages/steghide.jpg"
-)
-print("Tool predicted:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Full probabilities:", result["probabilities"])
-
-
-print("Predicting new images without originals ...\n")
-print("Predict is clean or stego ... this should be clean")
-result = predict_clean_or_stego("./training/testimages/grafana4.png")
-print("Prediction:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Probabilities:", result["probabilities"])
-
-print("Predict is clean or stego ... this should be OpenStego")
-result = predict_clean_or_stego("./training/testimages/openstegografana.png")
-print("Prediction:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Probabilities:", result["probabilities"])
-
-print("Predict is clean or stego ... this should be OutGuess")
-result = predict_clean_or_stego("./training/testimages/jopejaipeoutguess.jpg")
-print("Prediction:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Probabilities:", result["probabilities"])
-
-
-print("Predict is clean or stego ... this should be Steghide")
-result = predict_clean_or_stego("./training/testimages/JopeKalassa.JPG")
-print("Prediction:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Probabilities:", result["probabilities"])
-
-
-
-
-print("Predict is clean or stego ... this is encrypted witj Jari's tool")
-result = predict_clean_or_stego("./training/testimages/encrypted_kimalainen.jpg")
-print("Prediction:", result["prediction"])
-print("Confidence:", f"{result['confidence']:.2%}")
-print("Probabilities:", result["probabilities"])
-
-"""

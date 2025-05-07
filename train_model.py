@@ -1,7 +1,3 @@
-
-
-
-
 import pandas as pd
 import sqlite3
 from sklearn.ensemble import RandomForestClassifier
@@ -13,7 +9,17 @@ import joblib
 
 DB_PATH = "./training/database/steganalysis.db"
 
+
 def load_trace_dataframe(db_path: str) -> pd.DataFrame:
+    """
+    Load feature traces from the database and join with stego metadata.
+
+    Args:
+        db_path (str): Path to the SQLite database.
+
+    Returns:
+        pd.DataFrame: Feature data with metadata and trace features.
+    """
     conn = sqlite3.connect(db_path)
     df = pd.read_sql_query("""
         SELECT 
@@ -31,27 +37,33 @@ def load_trace_dataframe(db_path: str) -> pd.DataFrame:
     df['shape_mismatch'] = df['shape_mismatch'].astype(int)
     return df
 
+
 def main():
+    """
+    Train a Random Forest classifier to predict which steganography tool
+    (e.g., OpenStego, OutGuess, Steghide) was used based on image trace features.
+
+    Saves the model to disk after training.
+    """
     print("[INFO] Loading data...")
     df = load_trace_dataframe(DB_PATH)
 
-    # Poistetaan tunnisteet ja ei-numeeriset sarakkeet pois piirteistä
+    # Remove non-feature columns
     drop_cols = ['stego_id', 'tool', 'filetype']
     X = df.drop(columns=drop_cols)
-    y = df['tool']  # Voit vaihtaa tähän 'filetype' jos haluat
+    y = df['tool']
 
     print(f"[INFO] Data shape: {X.shape}, Labels: {y.nunique()} classes")
 
-    # Jaa opetus- ja testijoukkoihin
+    # Split into train/test
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Malli
     clf = RandomForestClassifier(n_estimators=100, random_state=42)
     clf.fit(X_train, y_train)
 
-    # Ennustukset ja tulokset
     y_pred = clf.predict(X_test)
     print("[RESULT] Classification report:\n", classification_report(y_test, y_pred))
+
     print("[RESULT] Confusion matrix:")
     cm = confusion_matrix(y_test, y_pred)
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=clf.classes_, yticklabels=clf.classes_)
@@ -61,7 +73,6 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # Ominaisuuksien tärkeys
     importances = pd.Series(clf.feature_importances_, index=X.columns).sort_values(ascending=False)
     print("[INFO] Top 10 features:\n", importances.head(10))
     importances.head(10).plot(kind='barh')
@@ -72,6 +83,7 @@ def main():
 
     joblib.dump(clf, "./training/models/rf_stegomodel.pkl")
     print("[INFO] Model saved to ./training/models/rf_stegomodel.pkl")
+
 
 if __name__ == "__main__":
     main()

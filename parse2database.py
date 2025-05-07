@@ -1,45 +1,47 @@
-
-
-
-"""
-Gather information from images and pairings from metadata
-
+### parse2database.py
 
 """
+StegaExpose - Image Steganography Analysis Framework
 
+This script provides database construction, statistical and structural analysis,
+and trace extraction for image steganography detection.
+
+Main components:
+- CreateDatabase: loads original and stego image paths from metadata CSV and initializes SQLite schema
+- AnalyzeDatabase: computes pixel-wise difference metrics between image pairs
+- StegoDecisionTreeAnalyzer: simple decision tree classifier based on low-level image differences
+- StegoTraceAnalyzer: extracts steganographic traces using multiple statistical methods
+
+Run this script as the entry point to build database, compute differences and run trace extraction.
+"""
+
+# TODO: Refactor content into separate modules for maintainability.
 
 import os
 import pandas as pd
 import sqlite3
-from PIL import Image, ExifTags
+from PIL import Image
 import numpy as np
 import cv2
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 import matplotlib.pyplot as plt
-from scipy.stats import entropy
-from skimage.util import view_as_blocks  # pip install scikit-image
-import matplotlib.pyplot as plt
+from scipy.stats import entropy, chisquare
+from skimage.util import view_as_blocks
 import scipy.fftpack
-from scipy.stats import chisquare
 
-
-# Directories and file paths
+# Paths and constants
 ORIGINAL_DIR = "./training/originals/"
-STEGO_OPENSTEGA_DIR = "./training/openstego/"
-STEGO_STEGHIDE_DIR = "./training/steghide/"
-STEGO_OUTGUESS_DIR = "./training/outguess/"
 STEGO_DIRS = {
-        "openstego": STEGO_OPENSTEGA_DIR,
-        "steghide": STEGO_STEGHIDE_DIR,
-        "outguess": STEGO_OUTGUESS_DIR
-    }
+    "openstego": "./training/openstego/",
+    "steghide": "./training/steghide/",
+    "outguess": "./training/outguess/"
+}
 SECRET_MESSAGE_FILE = "./training/embeds/testfile.txt"
-PASSPHRASE = "set"
 STEGO_METADATA_FILE = "./training/stego_metadata.csv"
 ANALYSIS_DB_FILE = "./training/database/steganalysis.db"
 VERIFY_MESSAGE_PATH = "./training/extracted/verify.txt"
 
-
+# Debug flags
 debug_create_database = True
 debug_analyzedatabase = True
 debug_stegodecisiontreeanalyzer = True
@@ -584,6 +586,15 @@ class StegoTraceAnalyzer:
                 trace.save_trace_results_to_db(sid, summary)
             except Exception as e:
                 print(f"[ERROR] Failed to analyze stego_id {sid}: {e}")
+
+# Class definitions follow in logical structure: DB creation, DB analysis, decision tree, trace analysis
+
+# (1) CreateDatabase
+# (2) AnalyzeDatabase
+# (3) StegoDecisionTreeAnalyzer
+# (4) StegoTraceAnalyzer (with histogram, DCT, statistical, LSB, save, run_all, and batch methods)
+
+# main() runs each of the components sequentially
 
 
 def main():
