@@ -1,33 +1,14 @@
-### parse2database.py
-
-"""
-StegaExpose - Image Steganography Analysis Framework
-
-This script provides database construction, statistical and structural analysis,
-and trace extraction for image steganography detection.
-
-Main components:
-- CreateDatabase: loads original and stego image paths from metadata CSV and initializes SQLite schema
-- AnalyzeDatabase: computes pixel-wise difference metrics between image pairs
-- StegoDecisionTreeAnalyzer: simple decision tree classifier based on low-level image differences
-- StegoTraceAnalyzer: extracts steganographic traces using multiple statistical methods
-
-Run this script as the entry point to build database, compute differences and run trace extraction.
-"""
-
-# TODO: Refactor content into separate modules for maintainability.
-
 import os
 import pandas as pd
 import sqlite3
 from PIL import Image
 import numpy as np
 import cv2
-from sklearn.tree import DecisionTreeClassifier, plot_tree
-import matplotlib.pyplot as plt
 from scipy.stats import entropy, chisquare
 from skimage.util import view_as_blocks
 import scipy.fftpack
+from multiprocessing import Pool
+import pywt
 
 # Paths and constants
 ORIGINAL_DIR = "./training/originals/"
@@ -44,12 +25,10 @@ VERIFY_MESSAGE_PATH = "./training/extracted/verify.txt"
 # Debug flags
 debug_create_database = True
 debug_analyzedatabase = True
-debug_stegodecisiontreeanalyzer = True
 debug_stegotraceanalyzer = True
 
-
 class CreateDatabase:
-    def __init__(self, original_dir: str, stego_dirs: str, metadata_file: str):
+    def __init__(self, original_dir: str, stego_dirs: dict, metadata_file: str):
         self.original_dir = original_dir
         self.stego_dirs = stego_dirs
         self.metadata_file = metadata_file
@@ -57,7 +36,6 @@ class CreateDatabase:
         self.check_metadata()
 
     def check_metadata(self):
-        # Add stego images from metadata CSV
         if not os.path.exists(self.metadata_file):
             raise FileNotFoundError(f"Metadata file not found: {self.metadata_file}")
 
@@ -66,6 +44,7 @@ class CreateDatabase:
             original_file = row['original']
             tool = row['tool']
             fname = row['outfile']
+            rate = row.get('rate', 'unknown')
             if tool not in self.stego_dirs:
                 if debug_create_database:
                     print(f"Unknown tool '{tool}' in metadata")
@@ -74,12 +53,7 @@ class CreateDatabase:
             full_orig_path = os.path.join(self.original_dir, original_file)
 
             if os.path.isfile(full_stego_path):
-                self.data.append((full_orig_path, full_stego_path, tool))
-
-            else:
-                if debug_create_database:
-                    print(f"Stego file not print (metadata)found: {full_stego_path}")
-
+                self.data.append((full_orig_path, full_stego_path, tool, rate))
 
     def create_db(self):
         db_path = ANALYSIS_DB_FILE
@@ -94,17 +68,15 @@ class CreateDatabase:
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
 
-        # Create tables
         c.execute("""
             CREATE TABLE originals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT,
-            filetype TEXT,
-            filesize INTEGER,
-            exif_exists BOOLEAN,
-            exif_offset INTEGER
-        )
-
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT,
+                filetype TEXT,
+                filesize INTEGER,
+                exif_exists BOOLEAN,
+                exif_offset INTEGER
+            )
         """)
 
         c.execute("""
@@ -119,9 +91,10 @@ class CreateDatabase:
                 diff_mean REAL,
                 diff_max INTEGER,
                 shape_mismatch BOOLEAN,
+                is_clean BOOLEAN DEFAULT 0,
+                rate TEXT,
                 FOREIGN KEY(original_id) REFERENCES originals(id)
-            )          
-
+            )
         """)
 
         c.execute("""
@@ -143,13 +116,15 @@ class CreateDatabase:
                 lsb_g_changed_pct REAL,
                 lsb_r_changed_pct REAL,
                 lsb_avg_changed_pct REAL,
+                wavelet_diff_mean REAL,
+                wavelet_diff_max REAL,
+                srm_mean REAL,
+                srm_max REAL,
                 FOREIGN KEY(stego_id) REFERENCES stego_images(id)
             )
         """)
 
-        # Process each data tuple
-        for orig_path, stego_path, tool in self.data:
-            # --- Analyze original ---
+        for orig_path, stego_path, tool, rate in self.data:
             orig_stat = os.stat(orig_path)
             orig_size = orig_stat.st_size
             orig_type = os.path.splitext(orig_path)[1][1:].lower()
@@ -161,7 +136,6 @@ class CreateDatabase:
                 exif = img._getexif()
                 if exif:
                     exif_exists = True
-                    # Estimate EXIF offset (not always reliable)
                     with open(orig_path, 'rb') as f:
                         data = f.read()
                         offset = data.find(b'Exif')
@@ -170,7 +144,6 @@ class CreateDatabase:
             except Exception:
                 pass
 
-            # Insert original
             c.execute("""
                 INSERT INTO originals (filename, filetype, filesize, exif_exists, exif_offset)
                 VALUES (?, ?, ?, ?, ?)
@@ -178,37 +151,29 @@ class CreateDatabase:
 
             original_id = c.lastrowid
 
-            # --- Analyze stego image ---
             stego_stat = os.stat(stego_path)
             stego_size = stego_stat.st_size
-            stego_type = os.path.splitext(stego_path)[1][1:].lower()
+            stego_type = os.path.splitext(stego_path)[1][1].lower()
 
-            # Placeholder diff metrics
             diff_mean = None
             diff_max = None
-
-            # Placeholder verification flag
             verified = None
 
-            # Insert stego
             c.execute("""
-                INSERT INTO stego_images (original_id, filename, tool, filetype, filesize, verified, diff_mean, diff_max)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (original_id, stego_path, tool, stego_type, stego_size, verified, diff_mean, diff_max))
+                INSERT INTO stego_images (original_id, filename, tool, filetype, filesize, verified, diff_mean, diff_max, rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (original_id, stego_path, tool, stego_type, stego_size, verified, diff_mean, diff_max, rate))
 
         conn.commit()
         conn.close()
         if debug_create_database:
             print("[INFO] Database created.")
 
-
 class AnalyzeDatabase:
-
     def __init__(self, db_path: str):
         self.db_path = db_path
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"Database file not found: {self.db_path}")
-
 
     def compute_diff_metrics(self):
         if debug_analyzedatabase:
@@ -229,6 +194,8 @@ class AnalyzeDatabase:
             try:
                 orig = cv2.imread(orig_path)
                 stego = cv2.imread(stego_path)
+                orig = cv2.resize(orig, (256, 256))
+                stego = cv2.resize(stego, (256, 256))
 
                 if orig is None or stego is None or orig.shape != stego.shape:
                     shape_mismatch = True
@@ -255,62 +222,6 @@ class AnalyzeDatabase:
         conn.close()
         if debug_analyzedatabase:
             print("[INFO] Diff metrics computed and saved.")
-
-class StegoDecisionTreeAnalyzer:
-    def __init__(self, db_path: str, max_depth: int = 3):
-        self.db_path = db_path
-        self.max_depth = max_depth
-        self.model = None
-        self.features = ['diff_mean', 'diff_max', 'shape_mismatch']
-        self.df = None
-
-    def load_data(self):
-        conn = sqlite3.connect(self.db_path)
-        query = """
-            SELECT tool, diff_mean, diff_max, shape_mismatch
-            FROM stego_images
-            WHERE diff_mean IS NOT NULL AND tool IS NOT NULL
-        """
-        self.df = pd.read_sql_query(query, conn)
-        conn.close()
-
-        self.df['shape_mismatch'] = self.df['shape_mismatch'].astype(int)
-
-    def train_tree(self):
-        if self.df is None:
-            raise ValueError("Data not loaded. Call load_data() first.")
-
-        X = self.df[self.features]
-        y = self.df['tool']
-
-        clf = DecisionTreeClassifier(max_depth=self.max_depth, random_state=42)
-        clf.fit(X, y)
-        self.model = clf
-
-    def visualize_tree(self):
-        if self.model is None:
-            raise ValueError("Model not trained. Call train_tree() first.")
-
-        plt.figure(figsize=(12, 6))
-        plot_tree(self.model,
-                  feature_names=self.features,
-                  class_names=self.model.classes_,
-                  filled=True,
-                  rounded=True)
-        plt.title("Decision Tree: Tool Prediction")
-        plt.tight_layout()
-        plt.show()
-
-    def run(self):
-        if debug_stegodecisiontreeanalyzer:
-            print("[INFO] Loading data...")
-        self.load_data()
-        if debug_stegodecisiontreeanalyzer:
-            print("[INFO] Training decision tree...")
-        self.train_tree()
-        if debug_stegodecisiontreeanalyzer:
-            print("[INFO] Visualizing tree...")
-        self.visualize_tree()
 
 class StegoTraceAnalyzer:
     def __init__(self, original_path: str, stego_path: str, db_path: str):
@@ -349,77 +260,35 @@ class StegoTraceAnalyzer:
         orig_path, stego_path = row
         return StegoTraceAnalyzer(orig_path, stego_path, db_path)
 
-    @staticmethod
-    def random_pair(db_path: str):
-        conn = sqlite3.connect(db_path)
-        df = pd.read_sql_query("""
-            SELECT s.id, o.filename, s.filename
-            FROM stego_images s
-            JOIN originals o ON s.original_id = o.id
-            LIMIT 1
-        """, conn)
-        conn.close()
-
-        sid, orig_path, stego_path = df.iloc[0]
-        if debug_stegotraceanalyzer:
-            print(f"[INFO] Using pair from DB (stego id={sid}):\n  {orig_path}\n  {stego_path}")
-        return StegoTraceAnalyzer(orig_path, stego_path)
-
     def histogram_kl_divergence(self, bins=256):
         kl_divs = []
-        for ch in range(3):  # R, G, B
+        for ch in range(3):
             orig_hist, _ = np.histogram(self.original[:, :, ch], bins=bins, range=(0, 256), density=True)
             stego_hist, _ = np.histogram(self.stego[:, :, ch], bins=bins, range=(0, 256), density=True)
-
-            # Vältä 0 log 0 virheet
             orig_hist += 1e-10
             stego_hist += 1e-10
-
             kl = entropy(orig_hist, stego_hist)
             kl_divs.append(kl)
-
         return {
-            "kl_r": kl_divs[2],  # OpenCV: BGR
+            "kl_r": kl_divs[2],
             "kl_g": kl_divs[1],
             "kl_b": kl_divs[0]
         }
 
-    def plot_histograms(self):
-        color = ('b', 'g', 'r')
-        plt.figure(figsize=(12, 6))
-        for i, col in enumerate(color):
-            orig_hist = cv2.calcHist([self.original], [i], None, [256], [0, 256])
-            stego_hist = cv2.calcHist([self.stego], [i], None, [256], [0, 256])
-
-            plt.subplot(1, 3, i + 1)
-            plt.plot(orig_hist, color=col, label='Original')
-            plt.plot(stego_hist, color='k', linestyle='dashed', label='Stego')
-            plt.title(f'Channel {col.upper()}')
-            plt.legend()
-
-        plt.tight_layout()
-        plt.show()
-
     def dct_difference_metrics(self, block_size=8):
-        """Laskee DCT-koeffisienttien keskimääräisen erotuksen jokaisessa väri-kanavassa."""
-
         def blockwise_dct_diff(orig_ch, stego_ch):
             h, w = orig_ch.shape
             h = h - h % block_size
             w = w - w % block_size
-
             orig_ch = orig_ch[:h, :w]
             stego_ch = stego_ch[:h, :w]
-
             orig_blocks = view_as_blocks(orig_ch, (block_size, block_size)).reshape(-1, block_size, block_size)
             stego_blocks = view_as_blocks(stego_ch, (block_size, block_size)).reshape(-1, block_size, block_size)
-
             diffs = []
             for ob, sb in zip(orig_blocks, stego_blocks):
                 dct_o = scipy.fftpack.dct(scipy.fftpack.dct(ob.T, norm='ortho').T, norm='ortho')
                 dct_s = scipy.fftpack.dct(scipy.fftpack.dct(sb.T, norm='ortho').T, norm='ortho')
                 diffs.append(np.abs(dct_o - dct_s))
-
             return np.mean(diffs, axis=0)
 
         results = {}
@@ -430,71 +299,86 @@ class StegoTraceAnalyzer:
             avg_dct_diff = blockwise_dct_diff(orig_ch, stego_ch)
             results[f'dct_{ch}_mean'] = float(np.mean(avg_dct_diff))
             results[f'dct_{ch}_max'] = float(np.max(avg_dct_diff))
-
         return results
 
     def statistical_tests(self):
-        """Laskee tilastollisia eroja alkuperäisen ja stegakuvan välillä."""
         results = {}
-
-        # Entropia: keskiarvo RGB-kanavien entropioista
         def channel_entropy(channel):
             hist, _ = np.histogram(channel, bins=256, range=(0, 256), density=True)
-            hist += 1e-10  # Vältä log(0)
+            hist += 1e-10
             return entropy(hist)
 
         orig_entropy = np.mean([channel_entropy(self.original[:, :, i]) for i in range(3)])
         stego_entropy = np.mean([channel_entropy(self.stego[:, :, i]) for i in range(3)])
         results['entropy_diff'] = stego_entropy - orig_entropy
 
-        # Varianssi: keskiarvo RGB-kanavien varianssieroista
         orig_var = np.var(self.original, axis=(0, 1))
         stego_var = np.var(self.stego, axis=(0, 1))
         results['variance_diff'] = float(np.mean(stego_var - orig_var))
 
-        # Chi²-testi: kokonaishistogrammien ero RGB-kanavista yhdistettynä
         orig_flat = self.original.ravel()
         stego_flat = self.stego.ravel()
         orig_hist, _ = np.histogram(orig_flat, bins=256, range=(0, 256))
         stego_hist, _ = np.histogram(stego_flat, bins=256, range=(0, 256))
-
-        # Vältä nollat
         orig_hist = orig_hist + 1
         stego_hist = stego_hist + 1
-
         chi2_stat, p_value = chisquare(f_obs=stego_hist, f_exp=orig_hist)
         results['chi2_pvalue'] = float(p_value)
-
         return results
 
     def lsb_difference(self):
-        """Laskee LSB-tasolla tapahtuneet muutokset ja palauttaa prosenttiosuuden muuttuneista biteistä per kanava."""
         results = {}
         total_pixels = self.original.shape[0] * self.original.shape[1]
-
         changes = []
         for i, ch in enumerate(['b', 'g', 'r']):
             orig_lsb = self.original[:, :, i] & 1
             stego_lsb = self.stego[:, :, i] & 1
             xor_lsb = orig_lsb ^ stego_lsb
-
             changed = np.count_nonzero(xor_lsb)
             percent_changed = changed / total_pixels * 100
-
             results[f'lsb_{ch}_changed_pct'] = percent_changed
             changes.append(percent_changed)
-
         results['lsb_avg_changed_pct'] = np.mean(changes)
         return results
 
+    def srm_features(self):
+        import torch
+        import torch.nn as nn
+        class SRMFilter(nn.Module):
+            def __init__(self):
+                super(SRMFilter, self).__init__()
+                srm_kernels = torch.tensor([
+                    [[[-1, 2, -2, 2, -1],
+                      [2, -6, 8, -6, 2],
+                      [-2, 8, -12, 8, -2],
+                      [2, -6, 8, -6, 2],
+                      [-1, 2, -2, 2, -1]]],
+                ], dtype=torch.float32)
+                self.conv = nn.Conv2d(3, 1, kernel_size=5, padding=2, bias=False)
+                self.conv.weight = nn.Parameter(srm_kernels, requires_grad=False)
+
+            def forward(self, x):
+                return self.conv(x)
+
+        srm = SRMFilter()
+        img = torch.from_numpy(cv2.cvtColor(self.stego, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)).float().unsqueeze(0)
+        srm_out = srm(img).numpy().flatten()
+        return {
+            "srm_mean": float(np.mean(srm_out)),
+            "srm_max": float(np.max(srm_out))
+        }
+
+    def wavelet_features(self):
+        coeffs_orig = pywt.wavedec2(self.original, 'db1', level=1)
+        coeffs_stego = pywt.wavedec2(self.stego, 'db1', level=1)
+        diff = [np.mean(np.abs(co[0] - cs[0])) for co, cs in zip(coeffs_orig, coeffs_stego)]
+        return {"wavelet_diff_mean": float(np.mean(diff)), "wavelet_diff_max": float(np.max(diff))}
 
     def save_trace_results_to_db(self, stego_id, trace_results: dict):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-
         columns = ['stego_id'] + list(trace_results.keys())
         values = [stego_id] + [trace_results[k] for k in trace_results]
-
         placeholders = ','.join(['?'] * len(columns))
         sql = f"""
             INSERT OR REPLACE INTO trace_results ({','.join(columns)})
@@ -505,69 +389,75 @@ class StegoTraceAnalyzer:
         conn.close()
 
     def run_all(self):
-        """Suorittaa kaikki analyysit ja palauttaa yhdistetyt tulokset."""
         results = {}
         try:
             results.update(self.histogram_kl_divergence())
         except Exception as e:
             results['kl_error'] = str(e)
-
         try:
             results.update(self.dct_difference_metrics())
         except Exception as e:
             results['dct_error'] = str(e)
-
         try:
             results.update(self.statistical_tests())
         except Exception as e:
             results['stats_error'] = str(e)
-
         try:
             results.update(self.lsb_difference())
         except Exception as e:
             results['lsb_error'] = str(e)
-
+        try:
+            results.update(self.srm_features())
+        except Exception as e:
+            results['srm_error'] = str(e)
+        try:
+            results.update(self.wavelet_features())
+        except Exception as e:
+            results['wavelet_error'] = str(e)
         return results
 
     @staticmethod
     def run_trace_analysis_for_clean_images(db_path: str):
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-
-        # Hae kaikki original-kuvat, joita ei ole käytetty stego-kuvissa
-        c.execute("""
-            SELECT id, filename
-            FROM originals
-            WHERE id NOT IN (SELECT DISTINCT original_id FROM stego_images)
-        """)
+        c.execute("SELECT id, filename FROM originals")
         clean_images = c.fetchall()
         conn.close()
 
         print(f"[INFO] Found {len(clean_images)} clean images to analyze.")
 
-        for orig_id, orig_path in clean_images:
+        def process_clean_image(orig_id_filename):
+            orig_id, orig_path = orig_id_filename
             try:
                 if debug_stegotraceanalyzer:
                     print(f"[TRACE] Processing clean original_id = {orig_id}")
-                # Käytetään samaa polkua sekä orig että stego – koska meillä ei ole vertailukuvaa
                 trace = StegoTraceAnalyzer(orig_path, orig_path, db_path)
                 results = trace.run_all()
+                results.update({
+                    "lsb_b_changed_pct": 0.0, "lsb_g_changed_pct": 0.0,
+                    "lsb_r_changed_pct": 0.0, "lsb_avg_changed_pct": 0.0,
+                    "kl_r": 0.0, "kl_g": 0.0, "kl_b": 0.0,
+                    "dct_b_mean": 0.0, "dct_b_max": 0.0,
+                    "dct_g_mean": 0.0, "dct_g_max": 0.0,
+                    "dct_r_mean": 0.0, "dct_r_max": 0.0
+                })
 
-                # Tallennetaan 'clean' tieto stego_images-tauluun ilman stegokuvaa
                 conn = sqlite3.connect(db_path)
                 c = conn.cursor()
                 c.execute("""
-                    INSERT INTO stego_images (original_id, filename, tool, filetype, shape_mismatch)
-                    VALUES (?, ?, NULL, ?, 0)
+                    INSERT INTO stego_images (original_id, filename, tool, filetype, shape_mismatch, is_clean)
+                    VALUES (?, ?, NULL, ?, 0, 1)
                 """, (orig_id, orig_path, os.path.splitext(orig_path)[1].lstrip('.').lower()))
                 stego_id = c.lastrowid
                 conn.commit()
                 conn.close()
 
                 trace.save_trace_results_to_db(stego_id, results)
-
             except Exception as e:
                 print(f"[ERROR] Failed to analyze clean original_id {orig_id}: {e}")
+
+        with Pool() as pool:
+            pool.map(process_clean_image, clean_images)
 
     @staticmethod
     def run_trace_analysis_for_all(db_path: str):
@@ -577,25 +467,16 @@ class StegoTraceAnalyzer:
         stego_ids = [row[0] for row in c.fetchall()]
         conn.close()
 
-        for sid in stego_ids:
+        def process_stego_id(sid):
             try:
-                if debug_stegotraceanalyzer:
-                    print(f"[TRACE] Processing stego_id = {sid} ... wait ... slow ...")
-                trace = StegoTraceAnalyzer.from_database(db_path, stego_id=sid)
+                trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=sid)
                 summary = trace.run_all()
                 trace.save_trace_results_to_db(sid, summary)
             except Exception as e:
                 print(f"[ERROR] Failed to analyze stego_id {sid}: {e}")
 
-# Class definitions follow in logical structure: DB creation, DB analysis, decision tree, trace analysis
-
-# (1) CreateDatabase
-# (2) AnalyzeDatabase
-# (3) StegoDecisionTreeAnalyzer
-# (4) StegoTraceAnalyzer (with histogram, DCT, statistical, LSB, save, run_all, and batch methods)
-
-# main() runs each of the components sequentially
-
+        with Pool() as pool:
+            pool.map(process_stego_id, stego_ids)
 
 def main():
     dbinstaller = CreateDatabase(ORIGINAL_DIR, STEGO_DIRS, STEGO_METADATA_FILE)
@@ -604,42 +485,12 @@ def main():
     analyzer = AnalyzeDatabase(ANALYSIS_DB_FILE)
     analyzer.compute_diff_metrics()
 
-    tree_analyzer = StegoDecisionTreeAnalyzer(ANALYSIS_DB_FILE)
-    tree_analyzer.run()
+    # Comment out StegoDecisionTreeAnalyzer for now
+    # tree_analyzer = StegoDecisionTreeAnalyzer(ANALYSIS_DB_FILE)
+    # tree_analyzer.run()
 
-    # ---- tests ---
-
-    """
-    trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=3)
-    kl = trace.histogram_kl_divergence()
-    print("KL:", kl)
-    trace.plot_histograms()
-
-    trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=1)
-    dct = trace.dct_difference_metrics()
-    print("DCT differences:", dct)
-
-
-    trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=2)
-    stats = trace.statistical_tests()
-    print("Statistical results:", stats)
-
-
-    trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=2)
-    lsb = trace.lsb_difference()
-    print("LSB diff %:", lsb)
-
-    trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=2)
-    summary = trace.run_all()
-    
-
-    for k, v in summary.items():
-        print(f"{k}: {v}")
-                """
-
-    # StegoTraceAnalyzer.run_trace_analysis_for_all(ANALYSIS_DB_FILE)
+    StegoTraceAnalyzer.run_trace_analysis_for_all(ANALYSIS_DB_FILE)
     StegoTraceAnalyzer.run_trace_analysis_for_clean_images(ANALYSIS_DB_FILE)
-
 
 if __name__ == "__main__":
     main()
