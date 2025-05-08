@@ -9,6 +9,10 @@ from skimage.util import view_as_blocks
 import scipy.fftpack
 from multiprocessing import Pool
 import pywt
+from multiprocessing import Value, Lock
+
+_counter = Value('i', 0)
+_counter_lock = Lock()
 
 # Paths and constants
 ORIGINAL_DIR = "./training/originals/"
@@ -26,6 +30,57 @@ VERIFY_MESSAGE_PATH = "./training/extracted/verify.txt"
 debug_create_database = True
 debug_analyzedatabase = True
 debug_stegotraceanalyzer = True
+
+
+def process_stego_id_global(sid):
+    try:
+        trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=sid)
+        summary = trace.run_all()
+        trace.save_trace_results_to_db(sid, summary)
+    except Exception as e:
+        print(f"[ERROR] Failed to analyze stego_id {sid}: {e}")
+    finally:
+        with _counter_lock:
+            _counter.value += 1
+            if _counter.value % 10 == 0:
+                print(f"[INFO] Processed { _counter.value } stego images...")
+
+def process_clean_image_global(orig_id_filename):
+    orig_id, orig_path = orig_id_filename
+    try:
+        if debug_stegotraceanalyzer:
+            print(f"[TRACE] Processing clean original_id = {orig_id}")
+        trace = StegoTraceAnalyzer(orig_path, orig_path, ANALYSIS_DB_FILE)
+        results = trace.run_all()
+        results.update({
+            "lsb_b_changed_pct": 0.0, "lsb_g_changed_pct": 0.0,
+            "lsb_r_changed_pct": 0.0, "lsb_avg_changed_pct": 0.0,
+            "kl_r": 0.0, "kl_g": 0.0, "kl_b": 0.0,
+            "dct_b_mean": 0.0, "dct_b_max": 0.0,
+            "dct_g_mean": 0.0, "dct_g_max": 0.0,
+            "dct_r_mean": 0.0, "dct_r_max": 0.0
+        })
+
+        conn = sqlite3.connect(ANALYSIS_DB_FILE)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO stego_images (original_id, filename, tool, filetype, shape_mismatch, is_clean)
+            VALUES (?, ?, NULL, ?, 0, 1)
+        """, (orig_id, orig_path, os.path.splitext(orig_path)[1].lstrip('.').lower()))
+        stego_id = c.lastrowid
+        conn.commit()
+        conn.close()
+
+        trace.save_trace_results_to_db(stego_id, results)
+    except Exception as e:
+        print(f"[ERROR] Failed to analyze clean original_id {orig_id}: {e}")
+    finally:
+        with _counter_lock:
+            _counter.value += 1
+            if _counter.value % 10 == 0:
+                print(f"[INFO] Processed { _counter.value } clean images...")
+
+
 
 class CreateDatabase:
     def __init__(self, original_dir: str, stego_dirs: dict, metadata_file: str):
@@ -416,6 +471,19 @@ class StegoTraceAnalyzer:
             results['wavelet_error'] = str(e)
         return results
 
+
+    @staticmethod
+    def run_trace_analysis_for_all(db_path: str):
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT id FROM stego_images WHERE is_clean = 0")
+        stego_ids = [row[0] for row in c.fetchall()]
+        conn.close()
+
+        print(f"[INFO] Running stego analysis for {len(stego_ids)} images...")
+        with Pool() as pool:
+            pool.map(process_stego_id_global, stego_ids)
+
     @staticmethod
     def run_trace_analysis_for_clean_images(db_path: str):
         conn = sqlite3.connect(db_path)
@@ -424,59 +492,10 @@ class StegoTraceAnalyzer:
         clean_images = c.fetchall()
         conn.close()
 
-        print(f"[INFO] Found {len(clean_images)} clean images to analyze.")
-
-        def process_clean_image(orig_id_filename):
-            orig_id, orig_path = orig_id_filename
-            try:
-                if debug_stegotraceanalyzer:
-                    print(f"[TRACE] Processing clean original_id = {orig_id}")
-                trace = StegoTraceAnalyzer(orig_path, orig_path, db_path)
-                results = trace.run_all()
-                results.update({
-                    "lsb_b_changed_pct": 0.0, "lsb_g_changed_pct": 0.0,
-                    "lsb_r_changed_pct": 0.0, "lsb_avg_changed_pct": 0.0,
-                    "kl_r": 0.0, "kl_g": 0.0, "kl_b": 0.0,
-                    "dct_b_mean": 0.0, "dct_b_max": 0.0,
-                    "dct_g_mean": 0.0, "dct_g_max": 0.0,
-                    "dct_r_mean": 0.0, "dct_r_max": 0.0
-                })
-
-                conn = sqlite3.connect(db_path)
-                c = conn.cursor()
-                c.execute("""
-                    INSERT INTO stego_images (original_id, filename, tool, filetype, shape_mismatch, is_clean)
-                    VALUES (?, ?, NULL, ?, 0, 1)
-                """, (orig_id, orig_path, os.path.splitext(orig_path)[1].lstrip('.').lower()))
-                stego_id = c.lastrowid
-                conn.commit()
-                conn.close()
-
-                trace.save_trace_results_to_db(stego_id, results)
-            except Exception as e:
-                print(f"[ERROR] Failed to analyze clean original_id {orig_id}: {e}")
-
+        print(f"[INFO] Running clean image trace analysis for {len(clean_images)} images...")
         with Pool() as pool:
-            pool.map(process_clean_image, clean_images)
+            pool.map(process_clean_image_global, clean_images)
 
-    @staticmethod
-    def run_trace_analysis_for_all(db_path: str):
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        c.execute("SELECT id FROM stego_images")
-        stego_ids = [row[0] for row in c.fetchall()]
-        conn.close()
-
-        def process_stego_id(sid):
-            try:
-                trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=sid)
-                summary = trace.run_all()
-                trace.save_trace_results_to_db(sid, summary)
-            except Exception as e:
-                print(f"[ERROR] Failed to analyze stego_id {sid}: {e}")
-
-        with Pool() as pool:
-            pool.map(process_stego_id, stego_ids)
 
 def main():
     dbinstaller = CreateDatabase(ORIGINAL_DIR, STEGO_DIRS, STEGO_METADATA_FILE)
