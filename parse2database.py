@@ -278,6 +278,15 @@ class AnalyzeDatabase:
         if debug_analyzedatabase:
             print("[INFO] Diff metrics computed and saved.")
 
+
+def process_stego_id(sid):
+    try:
+        trace = StegoTraceAnalyzer.from_database(ANALYSIS_DB_FILE, stego_id=sid)
+        summary = trace.run_all()
+        trace.save_trace_results_to_db(sid, summary)
+    except Exception as e:
+        print(f"[ERROR] Failed to analyze stego_id {sid}: {e}")
+
 class StegoTraceAnalyzer:
     def __init__(self, original_path: str, stego_path: str, db_path: str):
         self.original_path = original_path
@@ -382,45 +391,66 @@ class StegoTraceAnalyzer:
         return results
 
     def lsb_difference(self):
-        results = {}
+        import torch
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        results = []
         total_pixels = self.original.shape[0] * self.original.shape[1]
-        changes = []
+
         for i, ch in enumerate(['b', 'g', 'r']):
-            orig_lsb = self.original[:, :, i] & 1
-            stego_lsb = self.stego[:, :, i] & 1
-            xor_lsb = orig_lsb ^ stego_lsb
-            changed = np.count_nonzero(xor_lsb)
-            percent_changed = changed / total_pixels * 100
-            results[f'lsb_{ch}_changed_pct'] = percent_changed
-            changes.append(percent_changed)
-        results['lsb_avg_changed_pct'] = np.mean(changes)
-        return results
+            orig_ch = torch.from_numpy(self.original[:, :, i]).to(device)
+            stego_ch = torch.from_numpy(self.stego[:, :, i]).to(device)
+
+            orig_lsb = orig_ch & 1
+            stego_lsb = stego_ch & 1
+            diff = (orig_lsb ^ stego_lsb).float()
+            changed_pct = diff.sum().item() / total_pixels * 100
+
+            results.append(changed_pct)
+
+        return {
+            'lsb_b_changed_pct': results[0],
+            'lsb_g_changed_pct': results[1],
+            'lsb_r_changed_pct': results[2],
+            'lsb_avg_changed_pct': sum(results) / 3
+        }
 
     def srm_features(self):
         import torch
         import torch.nn as nn
+
         class SRMFilter(nn.Module):
             def __init__(self):
                 super(SRMFilter, self).__init__()
-                srm_kernels = torch.tensor([
-                    [[[-1, 2, -2, 2, -1],
-                      [2, -6, 8, -6, 2],
-                      [-2, 8, -12, 8, -2],
-                      [2, -6, 8, -6, 2],
-                      [-1, 2, -2, 2, -1]]],
-                ], dtype=torch.float32)
-                self.conv = nn.Conv2d(3, 1, kernel_size=5, padding=2, bias=False)
-                self.conv.weight = nn.Parameter(srm_kernels, requires_grad=False)
+                srm_kernel = torch.tensor([[
+                    [[-1, 2, -2, 2, -1],
+                     [2, -6, 8, -6, 2],
+                     [-2, 8, -12, 8, -2],
+                     [2, -6, 8, -6, 2],
+                     [-1, 2, -2, 2, -1]]
+                ]], dtype=torch.float32)
+                self.conv = nn.Conv2d(1, 1, kernel_size=5, padding=2, bias=False)
+                self.conv.weight = nn.Parameter(srm_kernel, requires_grad=False)
 
             def forward(self, x):
                 return self.conv(x)
 
-        srm = SRMFilter()
-        img = torch.from_numpy(cv2.cvtColor(self.stego, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)).float().unsqueeze(0)
-        srm_out = srm(img).numpy().flatten()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        srm = SRMFilter().to(device)
+        srm.eval()
+
+        srm_outs = []
+        for i in range(3):  # B, G, R
+            ch = self.stego[:, :, i]
+            ch_tensor = torch.from_numpy(ch).float().unsqueeze(0).unsqueeze(0).to(device)
+            with torch.no_grad():
+                filtered = srm(ch_tensor).cpu().numpy().flatten()
+                srm_outs.append(filtered)
+
+        all_srm = np.concatenate(srm_outs)
         return {
-            "srm_mean": float(np.mean(srm_out)),
-            "srm_max": float(np.max(srm_out))
+            "srm_mean": float(np.mean(all_srm)),
+            "srm_max": float(np.max(all_srm))
         }
 
     def wavelet_features(self):
@@ -448,37 +478,39 @@ class StegoTraceAnalyzer:
         try:
             results.update(self.histogram_kl_divergence())
         except Exception as e:
-            results['kl_error'] = str(e)
+            print(f"[ERROR] KL: {e}")
         try:
             results.update(self.dct_difference_metrics())
         except Exception as e:
-            results['dct_error'] = str(e)
+            print(f"[ERROR] DCT: {e}")
         try:
             results.update(self.statistical_tests())
         except Exception as e:
-            results['stats_error'] = str(e)
+            print(f"[ERROR] STATS: {e}")
         try:
             results.update(self.lsb_difference())
         except Exception as e:
-            results['lsb_error'] = str(e)
+            print(f"[ERROR] LSB: {e}")
         try:
             results.update(self.srm_features())
         except Exception as e:
-            results['srm_error'] = str(e)
+            print(f"[ERROR] SRM: {e}")
         try:
             results.update(self.wavelet_features())
         except Exception as e:
-            results['wavelet_error'] = str(e)
+            print(f"[ERROR] WAVELET: {e}")
         return results
 
-
+    @staticmethod
     @staticmethod
     def run_trace_analysis_for_all(db_path: str):
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-        c.execute("SELECT id FROM stego_images WHERE is_clean = 0")
+        c.execute("SELECT id FROM stego_images")
         stego_ids = [row[0] for row in c.fetchall()]
         conn.close()
+        with Pool() as pool:
+            pool.map(process_stego_id, stego_ids)
 
         print(f"[INFO] Running stego analysis for {len(stego_ids)} images...")
         with Pool() as pool:
