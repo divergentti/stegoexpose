@@ -3,6 +3,11 @@
 
 **StegaExpose** is a Python-based CLI tool and evolving framework for **analyzing**, **detecting**, and **classifying** steganographic content in digital media. It currently focuses on image-based steganography (e.g., OpenStego, Steghide, OutGuess) and supports both heuristic analysis and machine learning.
 
+Videos about development steps:
+
+![StegoExpose draft at YouTube](https://youtu.be/Vkgzyo-4qbU)
+
+
 ---
 
 ## 🌟 Update Summary (2025-05-07) (code now at oldcodes path)
@@ -94,7 +99,7 @@ A new PyQt6-based analysis window has been implemented, enabling users to:
 
 This interface sets the foundation for future visualizations, including heatmaps and unsupervised feature inspection.
 
-![GUI screenshot](https://github.com/divergentti/stegoexpose/blob/main/images/gui090525.png)  <!-- replace with actual image if uploaded -->
+![GUI screenshot](https://github.com/divergentti/stegoexpose/blob/main/images/gui090525.png) 
 
 
 ## 🔍 Future Steps
