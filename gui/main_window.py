@@ -57,8 +57,6 @@ class MainWindow(QMainWindow):
 
     def open_analyze_window(self):
         self.analyze_window = AnalyzeWindow()
-
-
         self.analyze_window.show()
 
     def show_about_dialog(self):

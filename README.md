@@ -1,10 +1,11 @@
+
 # 🕵️ StegaExpose – A Modular Framework for Detecting and Decoding Steganography in Media Files
 
 **StegaExpose** is a Python-based CLI tool and evolving framework for **analyzing**, **detecting**, and **classifying** steganographic content in digital media. It currently focuses on image-based steganography (e.g., OpenStego, Steghide, OutGuess) and supports both heuristic analysis and machine learning.
 
 ---
 
-## 🌟 Update Summary (2025-05-07)
+## 🌟 Update Summary (2025-05-07) (code now at oldcodes path)
 
 Originally, the project explored a CNN-based binary classification approach (**clean vs stego**), but training was negatively affected by **class imbalance** and **biases in the training set**. The current version introduces a **feature-based analysis pipeline**, where structured traces are extracted from images and used in classification models.
 
@@ -25,7 +26,7 @@ Originally, the project explored a CNN-based binary classification approach (**c
 
 ---
 
-## 🧠 Refactored & Modular Python Scripts
+## 🧠 Refactored & Modular Python Scripts (old)
 
 Below is a summary of the main Python files and their roles:
 
@@ -43,7 +44,7 @@ Below is a summary of the main Python files and their roles:
 
 ---
 
-## 🤖 Current Models & Outputs
+## 🤖 Old Models & Outputs
 
 | Model Path | Description |
 |------------|-------------|
@@ -55,7 +56,7 @@ Each model outputs both class prediction and class-wise probabilities.
 
 ---
 
-## 🔨 How to Use
+## 🔨 Old code How to Use
 
 ```bash
 # Extract trace features and store to database
@@ -72,12 +73,33 @@ python run_dual_prediction_test.py
 
 ---
 
+## 📸 Dataset + GUI Integration Update (2025-05-09)
+
+Over the last 24 hours, a structured database of stego images was generated. The final SQLite database is 6.9 MB and contains data for 14,868 stego images (4956 base images × 3 tools × 3 payload sizes), created using OpenStego, Steghide, and OutGuess derived from 2,076 original images. These originals span various resolutions, formats, devices, and even AI-generated content.
+
+To balance the dataset, images for which all stego tools could not embed messages of all sizes were excluded. Additionally, 139 clean images were included to support single-image analysis. These supplement the reference-based comparison approach.
+
+All code was refactored to use a unified `settings.py` that dynamically resolves paths using `runtimeconfig.json`, supporting both absolute and relative modes. Paths are now reflecting change, the GUI at ./gui and utils at ./utils. If you like to test, execute main_window.py at ./gui
+
+### 🖼 Analyze GUI
+
+A new PyQt6-based analysis window has been implemented, enabling users to:
+- Select an original image, stego tool, and message size
+- View original and stego image side-by-side
+- Inspect metadata and feature traces including:
+  - Shape mismatch
+  - KL divergence
+  - LSB avg change %
+  - SRM and wavelet metrics
+
+This interface sets the foundation for future visualizations, including heatmaps and unsupervised feature inspection.
+
+![GUI screenshot](https://github.com/divergentti/stegoexpose/images/gui090525.png)  <!-- replace with actual image if uploaded -->
+
+
 ## 🔍 Future Steps
 
-- Improve feature normalization and balance for clean/stego classification
-- Integrate GUI to visualize traces, differences, and classification confidence
 - Add support for custom tools (e.g., Jari's [encoder](https://github.com/divergentti/steganography))
-- Bundle as CLI and GUI hybrid app for forensic analysts
 
 ---
 

@@ -1,8 +1,15 @@
 import json
 import os
 
+
 CONFIG_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "runtimeconfig.json"))
 CONFIG_DIR = os.path.dirname(CONFIG_FILE)
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+def resolve_path(p):
+    return os.path.abspath(os.path.join(PROJECT_ROOT, p.lstrip("./")))
+
 
 with open(CONFIG_FILE, "r") as f:
     data = json.load(f)

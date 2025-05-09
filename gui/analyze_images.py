@@ -2,7 +2,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
     QComboBox, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 )
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtGui import QPixmap, QImage, QFont
+from PyQt6.QtWidgets import QGridLayout
 from PyQt6.QtCore import Qt
 import sqlite3
 import cv2
@@ -34,15 +35,37 @@ class AnalyzeWindow(QWidget):
         self.layout.addWidget(self.version_combo)
 
         self.images_layout = QHBoxLayout()
+        self.label_orig = QLabel("ORIGINAL")
+        self.label_orig.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_orig.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        self.label_orig.setStyleSheet("color: red;")
+        self.label_stego = QLabel("STEGA")
+        self.label_stego.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_stego.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        self.label_stego.setStyleSheet("color: blue;")
         self.orig_view = QGraphicsView()
+        self.stego_info = QLabel("Stego Analysis:")
+        self.stego_info.setWordWrap(True)
+        self.orig_info = QLabel("Original Image:")
+        self.orig_info.setWordWrap(True)
+
         self.stego_view = QGraphicsView()
         self.orig_scene = QGraphicsScene()
         self.stego_scene = QGraphicsScene()
         self.orig_view.setScene(self.orig_scene)
         self.stego_view.setScene(self.stego_scene)
-        self.images_layout.addWidget(self.orig_view)
-        self.images_layout.addWidget(self.stego_view)
-        self.layout.addLayout(self.images_layout)
+        self.orig_view.setMinimumSize(256, 256)
+        self.stego_view.setMinimumSize(256, 256)
+        self.image_grid = QGridLayout()
+        self.image_grid.addWidget(self.orig_view, 1, 0)
+        self.image_grid.addWidget(self.stego_view, 1, 1)
+        self.image_grid.addWidget(self.label_orig, 0, 0)
+        self.image_grid.addWidget(self.label_stego, 0, 1)
+        self.image_grid.addWidget(self.orig_view, 1, 0)
+        self.image_grid.addWidget(self.stego_view, 1, 1)
+        self.image_grid.addWidget(self.orig_info, 2, 0)
+        self.image_grid.addWidget(self.stego_info, 2, 1)
+        self.layout.addLayout(self.image_grid)
 
         self.details = QLabel("Select a stego variant to view analysis.")
         self.details.setWordWrap(True)
@@ -131,13 +154,16 @@ class AnalyzeWindow(QWidget):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         c.execute("""
-            SELECT o.filename, s.filename, s.tool, s.diff_mean, s.diff_max, s.shape_mismatch,
+            SELECT o.filename, o.filesize, o.filetype,
+                   s.filename, s.filesize, s.filetype,
+                   s.tool, s.diff_mean, s.diff_max, s.shape_mismatch,
                    t.kl_r, t.kl_g, t.kl_b, t.lsb_avg_changed_pct, t.srm_mean, t.wavelet_diff_mean
             FROM stego_images s
             JOIN originals o ON s.original_id = o.id
             LEFT JOIN trace_results t ON s.id = t.stego_id
             WHERE s.id = ?
         """, (sid,))
+
         row = c.fetchone()
         conn.close()
 
@@ -145,18 +171,22 @@ class AnalyzeWindow(QWidget):
             self.details.setText("No data found.")
             return
 
-        orig_path, steg_path, tool, diff_mean, diff_max, shape_mismatch, klr, klg, klb, lsbavg, srm, wav = row
+        orig_path, orig_size, orig_type, steg_path, steg_size, steg_type, tool, diff_mean, diff_max, shape_mismatch, klr, klg, klb, lsbavg, srm, wav = row
+
         self.last_images = (orig_path, steg_path)
 
         self.load_image_to_scene(orig_path, self.orig_scene)
         self.load_image_to_scene(steg_path, self.stego_scene)
 
-        self.details.setText(f"""<b>Tool:</b> {tool}<br>
-<b>Shape mismatch:</b> {shape_mismatch}<br>
-<b>Diff mean:</b> {diff_mean:.2f} | <b>Diff max:</b> {diff_max}<br>
-<b>KL Divergence (R,G,B):</b> {klr:.4f}, {klg:.4f}, {klb:.4f}<br>
-<b>LSB Avg Changed %:</b> {lsbavg:.2f}%<br>
-<b>SRM Mean:</b> {srm:.4f} | <b>Wavelet Diff Mean:</b> {wav:.4f}<br>""")
+        self.orig_info.setText(
+            f"Original File: {os.path.basename(orig_path)}\nSize: {orig_size} bytes | Type: {orig_type}")
+        self.stego_info.setText(f"""<b>Tool:</b> {tool}<br>
+        <b>Size:</b> {steg_size} bytes | <b>Type:</b> {steg_type}<br>
+        <b>Shape mismatch:</b> {shape_mismatch}<br>
+        <b>Diff mean:</b> {diff_mean:.2f} | <b>Diff max:</b> {diff_max}<br>
+        <b>KL Divergence (R,G,B):</b> {klr:.4f}, {klg:.4f}, {klb:.4f}<br>
+        <b>LSB Avg Changed %:</b> {lsbavg:.2f}%<br>
+        <b>SRM Mean:</b> {srm:.4f} | <b>Wavelet Diff Mean:</b> {wav:.4f}<br>""")
 
     def show_lsb_diff(self):
         orig_path, steg_path = self.last_images
@@ -177,11 +207,26 @@ class AnalyzeWindow(QWidget):
         cv2.imshow("LSB Difference Heatmap", heatmap)
 
     def load_image_to_scene(self, path, scene):
+        if not os.path.isabs(path):
+            path = os.path.join(settings.PROJECT_ROOT, path.lstrip("./"))
+        print("Resolved path:", path)
+
         if not os.path.exists(path):
+            print("[ERROR] File not found:", path)
             return
+
         img = cv2.imread(path)
+        if img is None:
+            print("OpenCV failed to read image.")
+            return
+
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, _ = img.shape
         qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg).scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio)
-        scene.addPixmap(pixmap)
+        pixmap = QPixmap.fromImage(qimg)
+
+        scene.clear()
+        item = QGraphicsPixmapItem(pixmap.scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio))
+        scene.addItem(item)
+
+
