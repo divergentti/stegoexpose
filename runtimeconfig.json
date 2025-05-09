@@ -1,0 +1,16 @@
+{
+  "training_dir": "./training",
+  "originals_dir": "./training/originals",
+  "openstego_dir": "./training/openstego",
+  "steghide_dir": "./training/steghide",
+  "outguess_dir": "./training/outguess",
+  "database_path": "./training/database/steganalysis.db",
+  "metadata_path": "./training/stego_metadata.csv",
+  "verify_message_path": "./training/extracted/verify.txt",
+  "passphrase": "set",
+  "message_path":"./training/embeds",
+  "message_file_small": "./training/embeds/small.txt",
+  "message_file_medium": "./training/embeds/medium.txt",
+  "message_file_large": "./training/embeds/large.txt",
+  "message_file_test": "./training/embeds/testfile.txt"
+}
