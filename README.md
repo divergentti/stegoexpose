@@ -5,7 +5,7 @@
 
 Videos about development steps:
 
-![StegoExpose draft at YouTube](https://youtu.be/Vkgzyo-4qbU)
+[StegoExpose draft at YouTube](https://youtu.be/Vkgzyo-4qbU)
 
 
 ---
