@@ -94,7 +94,7 @@ A new PyQt6-based analysis window has been implemented, enabling users to:
 
 This interface sets the foundation for future visualizations, including heatmaps and unsupervised feature inspection.
 
-![GUI screenshot](https://github.com/divergentti/stegoexpose/images/gui090525.png)  <!-- replace with actual image if uploaded -->
+![GUI screenshot](https://github.com/divergentti/stegoexpose/blob/main/images/gui090525.png)  <!-- replace with actual image if uploaded -->
 
 
 ## 🔍 Future Steps
